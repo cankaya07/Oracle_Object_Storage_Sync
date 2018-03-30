@@ -133,7 +133,7 @@ $XStorageUser= $StorageAccountName+':'+$UserEmail
 $AuthToken=''
 
 
-function GetWebRequest($Uri, $get)
+function GetWebRequest($Uri, $get, $cName=$ContainerName)
 {
     $headers = @{}
 
@@ -145,36 +145,36 @@ function GetWebRequest($Uri, $get)
     $headers["X-Auth-Token"] = $script:AuthToken;
     try
     {
-        Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri)
-        $response = Invoke-WebRequest -Method $get -Headers $headers $Uri
+        Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri+$cName)
+        $response = Invoke-WebRequest -Method $get -Headers $headers $Uri$cName
         
         if($response.StatusCode -eq 200)
         {
-            Write-Log -Level Info -Message ("Successfully executed.`t"+$response.StatusDescription +"`t"+$get+"`t"+$Uri)
+            Write-Log -Level Info -Message ("Successfully executed.`t"+$response.StatusDescription +"`t"+$get+"`t"+$Uri+$cName)
             return $response
         }
         elseif($response.StatusCode -eq 401){
             Write-Log -Level Info -Message "Token has been expired"
             Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
             (GetToken);
-            return (GetWebRequest $Uri $get)
+            return (GetWebRequest $Uri$cName $get)
         }
 		elseif($response.StatusCode -eq 404){
             Write-Log -Level Error -Message "There is no object in there. Not Found"
-			Write-Log -Level Info -Message $response.StatusDescription+$Uri+" "+$get
+			Write-Log -Level Info -Message $response.StatusDescription+$Uri$cName+" "+$get
             return $null
         }
         else
         {
             Write-Log -Level Info -Message "For Status Codes: https://docs.oracle.com/en/cloud/iaas/storage-cloud/ssapi/Status%20Codes.html"
-            Write-Log -Level Error -Message ($response.StatusDescription+$Uri+" "+$get)
+            Write-Log -Level Error -Message ($response.StatusDescription+$Uri+$cName+" "+$get)
             Write-Host "ERROR GetWebRequest else block";
         }
     }
     catch
     {
         Write-Host $_.Exception.Message
-        Write-Log -Level Error -Message $get+"`t"+ $Uri+"`t"+ $_.Exception.Message
+        Write-Log -Level Error -Message $get+"`t"+ $Uri$cName+"`t"+ $_.Exception.Message
     }
 }
 
@@ -242,7 +242,7 @@ function DeleteFileFromFileSystem($fileName,$cName=$ContainerName)
     Write-Host (GetWebRequest ($StorageUri+$cName+'/'+$fileName)  Delete).Content 
 }
 
-function UploadAll()
+function UploadAll($cName=$ContainerName)
 {
     $errorFlag=0;
     $i=1;
@@ -252,7 +252,7 @@ function UploadAll()
 
                                                                                                                                                             Foreach-Object {
     Write-Progress -Activity "Propce files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount)*100)
-    $cloudFile= (GetCloudFileMetaData $_.Name)
+    $cloudFile= (GetCloudFileMetaData $_.Name,$cName)
  
     #there is a file with same name on the cloud
     if($cloudFile)
@@ -281,7 +281,7 @@ function UploadAll()
         if($errorFlag -eq 0)
         {
             Write-Log -Level Info -Message ("Uploading.... "+($_.Name))
-            UploadFile $_.FullName 
+            UploadFile ($_.FullName ,$cName)
         }
     }
 
