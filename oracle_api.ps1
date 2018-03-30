@@ -5,8 +5,22 @@ $UserPass = 'password'
 $IdentityDomain = 'youridentitydomainNAme'
 $LocalFilePath='E:\Pictures'
 $extension='*'
- 
 # END Parameters
+
+<#
+
+.EXAMPLE
+    ListContainers
+    List of Containers
+.EXAMPLE
+    ListCloudFiles {Container Name}
+    ListCloudFiles  _apaas
+    Listing objects under the _apaas container
+.EXAMPLE
+    GetCloudFileMetaData {filename} {Container Name}
+    GetCloudFileMetaData bootdisk.tar.gz compute_images
+    Getting metadata for specific file under the specified container
+#>
 
 <#
 .Synopsis
@@ -133,7 +147,7 @@ $XStorageUser= $StorageAccountName+':'+$UserEmail
 $AuthToken=''
 
 
-function GetWebRequest($Uri, $get, $cName=$ContainerName)
+function GetWebRequest($Uri, $get)
 {
     $headers = @{}
 
@@ -145,36 +159,37 @@ function GetWebRequest($Uri, $get, $cName=$ContainerName)
     $headers["X-Auth-Token"] = $script:AuthToken;
     try
     {
-        Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri+$cName)
-        $response = Invoke-WebRequest -Method $get -Headers $headers $Uri$cName
+        Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri)
+        $response = Invoke-WebRequest -Method $get -Headers $headers $Uri
         
         if($response.StatusCode -eq 200)
         {
-            Write-Log -Level Info -Message ("Successfully executed.`t"+$response.StatusDescription +"`t"+$get+"`t"+$Uri+$cName)
+            Write-Log -Level Info -Message ("Successfully executed.`t"+$response.StatusDescription +"`t"+$get+"`t"+$Uri)
             return $response
         }
         elseif($response.StatusCode -eq 401){
             Write-Log -Level Info -Message "Token has been expired"
             Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
             (GetToken);
-            return (GetWebRequest $Uri$cName $get)
+            return (GetWebRequest $Uri $get)
         }
 		elseif($response.StatusCode -eq 404){
             Write-Log -Level Error -Message "There is no object in there. Not Found"
-			Write-Log -Level Info -Message $response.StatusDescription+$Uri$cName+" "+$get
+			Write-Log -Level Info -Message $response.StatusDescription+$Uri+" "+$get
             return $null
         }
         else
         {
             Write-Log -Level Info -Message "For Status Codes: https://docs.oracle.com/en/cloud/iaas/storage-cloud/ssapi/Status%20Codes.html"
-            Write-Log -Level Error -Message ($response.StatusDescription+$Uri+$cName+" "+$get)
-            Write-Host "ERROR GetWebRequest else block";
+            Write-Log -Level Info -Message ("Status Code: "+$response.StatusDescription+" "+$Uri+" "+$get)
+            Write-Log -Level Info -Message "ERROR GetWebRequest else block";
+            return $null
         }
     }
     catch
     {
         Write-Host $_.Exception.Message
-        Write-Log -Level Error -Message $get+"`t"+ $Uri$cName+"`t"+ $_.Exception.Message
+        Write-Log -Level Error -Message $get+"`t"+ $Uri+"`t"+ $_.Exception.Message
     }
 }
 
@@ -190,7 +205,7 @@ function GetToken
 
 function GetCloudFileMetaData($fileName,$cName=$ContainerName)
 {
-    Write-Log -Level Info -Message "Getting "+$fileName +"'s metadata from cloud"
+    Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
     return   CheckGetData((GetWebRequest ($StorageUri+$cName+'/'+$fileName) Head))
 }
 
@@ -201,14 +216,30 @@ function ListCloudFiles($cName=$ContainerName)
 }
 
 function CheckGetData($result){
- if($result -ne $null -and [bool]($result.PSobject.Properties.name -match "Content")){
-		return  $result.Content.Split("`r`n")
+    if($result -ne $null -and [bool]($result.PSobject.Properties.name -match "RawContent")){
+        if($result.Content.gettype().Name -eq 'String'){
+            return  $result.Content.Split("`r`n");
+        }elseif($result.Content.gettype().Name -eq 'Byte[]')
+        {
+            return $result.RawContent;
+        }
 	 }
 }
 
 function ListContainers()
 {
     return  CheckGetData((GetWebRequest $OracleApiUri'v1/'$StorageAccountName"?limit=15"  Get))
+}
+
+function ManifestFile($remoteFile, $cName=$ContainerName)
+{
+    #You can't download objects that are larger than 10 MB using the web console. To download such objects, use the CLI or REST API.
+    $ssUri= ($StorageUri+$cName+'/'+$remoteFile+"?multipart-manifest=get")
+    Write-Log -Level Info -Message ("Starting to download "+$remoteFile +" from the cloud")
+    $headers["X-Auth-Token"] = $script:AuthToken;
+    Write-Log -Level Info -Message ("Invoke-WebRequest -Headers $headers -Method Get -uri $ssUri")
+    $response = Invoke-WebRequest -Headers $headers -Method Get -uri $ssUri
+    Write-Host ($response)
 }
 
 function UploadFile($localfile, $cName=$ContainerName)
@@ -296,8 +327,6 @@ function UploadAll($cName=$ContainerName)
     }
 
 }
- 
-ListContainers
 
 
 
