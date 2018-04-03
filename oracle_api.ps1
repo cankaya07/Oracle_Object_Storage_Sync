@@ -35,6 +35,9 @@ $extension='*'
         DeleteFileFromCloud $file compute_images $true
     }
     Delete All files under the specific container 
+.EXAMPLE
+    UploadFile {your file path} {container}
+    UploadFile "C:\Users\can.kaya\Downloads\abba.png" compute_images
 #>
 
 <#
@@ -272,27 +275,6 @@ function ManifestFile($remoteFile, $cName=$ContainerName)
     }
 }
 
-function UploadFile($localfile, $cName=$ContainerName)
-{
-    $ssUri= ($StorageUri+$cName+'/'+($_.Name))
-
-    Write-Log -Level Info -Message" Starting to upload "+$fileName +"'to cloud"
-    Write-Log -Level Info -Message" Invoke-WebRequest -Method Put -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+  ($StorageUri+$cName+'/'+($_.Name))+" -Infile"+ $localfile
-    $response = Invoke-WebRequest -Headers $headers -Method Put -uri $ssUri -Infile $localfile
-
-    Write-Host ($response)
-    Write-Host $response.Content
-    if($response.StatusCode -eq 200)
-    {
-        Write-Log -Level Info -Message " File successfully uploaded.`t"+($response.StatusDescription)+"`tPUT`t"+($StorageUri+$cName+'/'+($_.Name))
-        return $response
-    }
-    else
-    {
-        Write-Log -Level Error -Message "Error occured while file uploading"
-    }
-}
-
 # DO NOT USE THIS METHOD
 function DeleteFileFromCloud($fileName,$cName=$ContainerName, $overrideAllYes=$false)
 {
@@ -321,6 +303,37 @@ function DeleteFileFromCloud($fileName,$cName=$ContainerName, $overrideAllYes=$f
         return $null;
     }
 }
+
+function UploadFile($localfile, $cName=$ContainerName)
+{
+    #TODO: We must consider replace the file which has already in there this method overrides now
+    $toUploadFile = Get-ChildItem $localfile
+    $ssUri= ($StorageUri+$cName+'/'+$toUploadFile.Name)
+    GetToken
+    $_headers = @{}
+    $_headers["X-Auth-Token"] = $script:AuthToken;
+    
+
+    Write-Log -Level Info -Message (" Starting to upload "+$localfile +"'to cloud")
+    #Write-Log -Level Info -Message (" Invoke-WebRequest -Method Put -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+  $ssUri+" -Infile"+ $localfile)
+    $response = Invoke-WebRequest -Headers $_headers -Method Put -uri $ssUri -Infile $localfile
+
+    $response 
+    if($response.StatusCode -eq 201)
+    {
+        Write-Log -Level Info -Message (" File successfully uploaded.`t"+($response.StatusDescription)+"`tPUT`t"+($StorageUri+$cName+'/'+($toUploadFile.Name)))
+        return $true;
+    }
+    else
+    {
+        Write-Log -Level Warn -Message "Error occured while file uploading"
+		return $false;
+    }
+}
+
+ 
+
+
 
 function UploadAll($cName=$ContainerName)
 {
