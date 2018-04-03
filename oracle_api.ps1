@@ -20,6 +20,21 @@ $extension='*'
     GetCloudFileMetaData {filename} {Container Name}
     GetCloudFileMetaData bootdisk.tar.gz compute_images
     Getting metadata for specific file under the specified container
+.EXAMPLE
+    ManifestFile {filename} {Container Name}
+    ManifestFile Win2016x64.ISO compute_images
+    Getting manifest info for specific file
+.EXAMPLE
+    DeleteFileFromCloud {filename} {Container Name} [optional {override y/n prompt }]
+    DeleteFileFromCloud little_mix_wrong.jpg compute_images
+    DeleteFileFromCloud little_mix_wrong.jpg compute_images $true --override prompt
+.EXAMPLE 
+    $fileList=ListCloudFiles compute_images
+    foreach($file in $fileList)
+    {
+        DeleteFileFromCloud $file compute_images $true
+    }
+    Delete All files under the specific container 
 #>
 
 <#
@@ -174,10 +189,15 @@ function GetWebRequest($Uri, $get)
             return (GetWebRequest $Uri $get)
         }
 		elseif($response.StatusCode -eq 404){
-            Write-Log -Level Error -Message "There is no object in there. Not Found"
-			Write-Log -Level Info -Message $response.StatusDescription+$Uri+" "+$get
+            Write-Log -Level Info -Message "No object found(s)"
+			#Write-Log -Level Info -Message $response.StatusDescription $Uri " "$get
             return $null
         }
+		elseif($response.StatusCode -eq 204){
+			Write-Log -Level Info -Message "No object found(s)"
+			return $response
+		}
+		
         else
         {
             Write-Log -Level Info -Message "For Status Codes: https://docs.oracle.com/en/cloud/iaas/storage-cloud/ssapi/Status%20Codes.html"
@@ -188,16 +208,18 @@ function GetWebRequest($Uri, $get)
     }
     catch
     {
-        Write-Host $_.Exception.Message
-        Write-Log -Level Error -Message $get+"`t"+ $Uri+"`t"+ $_.Exception.Message
+        Write-Log -Level Warn -Message ($_.Exception.Message)
+        return $null;
     }
 }
+
 
 function GetToken
 {  
     $headers_ = @{}
     $headers_["X-Storage-User"] = $XStorageUser
     $headers_["X-Storage-Pass"] = $UserPass
+    $headers_["Content-Type"]= "text/plain;charset=UTF-8" 
     Write-Log -Level Info -Message "Getting new Token"
     $script:AuthToken = (Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri).Headers["X-Auth-Token"].ToString();
     Write-Log -Level Info -Message $("New Token's value is "+ ($script:AuthToken))
@@ -235,11 +257,19 @@ function ManifestFile($remoteFile, $cName=$ContainerName)
 {
     #You can't download objects that are larger than 10 MB using the web console. To download such objects, use the CLI or REST API.
     $ssUri= ($StorageUri+$cName+'/'+$remoteFile+"?multipart-manifest=get")
+    Write-Host $ssUri
     Write-Log -Level Info -Message ("Starting to download "+$remoteFile +" from the cloud")
-    $headers["X-Auth-Token"] = $script:AuthToken;
-    Write-Log -Level Info -Message ("Invoke-WebRequest -Headers $headers -Method Get -uri $ssUri")
-    $response = Invoke-WebRequest -Headers $headers -Method Get -uri $ssUri
-    Write-Host ($response)
+    $file = GetCloudFileMetaData $remoteFile $cName
+    if($file.Contains("application/x-www-form-urlencoded;charset=UTF-8"))
+    {
+        #has manifestfile
+        return CheckGetData((GetWebRequest $ssUri  Get))
+    }
+    else
+    {
+        Write-Log -Level Warn -Message (" "+$remoteFile +" doesn't have manifest file")
+        return $null
+    }
 }
 
 function UploadFile($localfile, $cName=$ContainerName)
@@ -264,13 +294,32 @@ function UploadFile($localfile, $cName=$ContainerName)
 }
 
 # DO NOT USE THIS METHOD
-function DeleteFileFromFileSystem($fileName,$cName=$ContainerName)
+function DeleteFileFromCloud($fileName,$cName=$ContainerName, $overrideAllYes=$false)
 {
-    Write-Log -Level Info -Message" Deleting this file "+$fileName +"'from cloud"
-    #Write-Host (GetWebRequest ($StorageUri+'/'+$fileName) Delete)
-    #return (GetWebRequest ($StorageUri+'/'+$fileName) Delete).Content 
-
-    Write-Host (GetWebRequest ($StorageUri+$cName+'/'+$fileName)  Delete).Content 
+    Write-Log -Level Warn -Message ("Script will delete this file "+$fileName+ " from cloud")
+    if($overrideAllYes){
+        $confirmation = "y";
+    }else{
+        $confirmation = Read-Host "Are you sure to delete this file? [y/n]"
+    }
+    
+    if($confirmation -eq "y")
+    {
+        $result= (GetWebRequest ($StorageUri+$cName+'/'+$fileName)  Delete) 
+        Write-Host $result 
+        if($result.StatusCode -eq 204){
+			Write-Log -Level Info -Message "File deletion succeeded"
+			return $true;
+		}else{
+			Write-Log -Level Info -Message "Error! File couldnt delete"
+			return $false;
+		}
+    }
+    else
+    {
+        Write-Log -Level Info -Message ("Canceled")
+        return $null;
+    }
 }
 
 function UploadAll($cName=$ContainerName)
@@ -321,14 +370,8 @@ function UploadAll($cName=$ContainerName)
         Write-Host "Houston we have a problem :)"
         break;
     }
-
     $i=$i+1;
-  
     }
 
 }
-
-
-
-
 
