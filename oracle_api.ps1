@@ -335,6 +335,8 @@ function CheckGetData($result){
 }
 
 function ConvertTextToObject($_result){
+	if(!$_result){return $null;}
+
 	$_result=$_result.Split("`r`n",[System.StringSplitOptions]::RemoveEmptyEntries)
 	$properties = @{}
 	$properties.Add("StatusCode", $_result[0].Replace("HTTP/1.1" ,"").Split(" ")[1])
@@ -434,26 +436,25 @@ function UploadAll($cName=$ContainerName, $LocalFilePath="E:\Pictures", $extensi
 {
     $errorFlag=0;
     $i=1;
-    $fileCount = ( Get-ChildItem $LocalFilePath -Filter $extension | Measure-Object ).Count;
+    $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Measure-Object ).Count;
 
-    $files = Get-ChildItem $LocalFilePath -Filter $extension | sort LastWriteTimeUtc -Descending | Foreach-Object {
+    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | sort LastWriteTimeUtc -Descending | Foreach-Object {
         Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount)*100)
         $cloudFile= (GetCloudFileMetaData -cName $cName -fileName $_.Name)
-		Write-Output  $cloudFile
         #there is a file with same name on the cloud
-        if($cloudFile)
+        if($cloudFile -ne $null)
         {
             #these files length are same
-            if($cloudFile."Content-Length" -ne $_.Length)        
+            if([long]$cloudFile."Content-Length" -ne $_.Length)        
             {   
-                Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Name)+" "+$cloudFile."Content-Length" +" <> "+$_.Length)
+                Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Length)+" "+$cloudFile."Content-Length" +" <> "+$_.Length)
                 $errorFlag=1
             }
-
+			
             #as we expect the date of these files
-            if([datetime]$cloudFile."Last-Modified" -lt $_.LastWriteTimeUtc)
+            if([datetime]$cloudFile."Last-Modified" -lt $_.LastAccessTimeUtc)
             {
-                Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.Name)+" "+$cloudFile."Last-Modified"+" <= "+ $_.LastWriteTimeUtc)
+                Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.LastWriteTimeUtc)+" "+$cloudFile."Last-Modified"+" <= "+ $_.LastWriteTimeUtc)
                 $errorFlag=1
             }
 
@@ -483,7 +484,7 @@ function UploadAll($cName=$ContainerName, $LocalFilePath="E:\Pictures", $extensi
 }
 
  
+UploadAll -cName 'compute_images' -extension "*" -LocalFilePath 'J:\BACKUP\'
 
-UploadAll -cName "compute_images" -extension "*.jpg" -LocalFilePath "E:\Pictures"
 
 
