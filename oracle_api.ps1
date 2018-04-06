@@ -1,12 +1,14 @@
 ﻿# BEGIN Parameters
-$ContainerName='compute_images';
 $UserEmail='xxx@email.com'
 $UserPass = 'password'
 $IdentityDomain = 'youridentitydomainNAme'
-$LocalFilePath='E:\Pictures'
-$extension='*'
 # END Parameters
 
+
+
+$ContainerName='testContainer';
+$LocalFilePath='E:\Pictures'
+$extension='*'
 
 
 <#
@@ -251,6 +253,7 @@ $AuthToken=''
 function GetWebRequest($Uri, $get, $InFile, $OutFile)
 {
     $headers = @{}
+	$_result;
 
     if($script:AuthToken -eq '')
     {
@@ -275,10 +278,10 @@ function GetWebRequest($Uri, $get, $InFile, $OutFile)
             Write-Log -Level Info -Message ("Successfully executed.`t"+$response.StatusDescription +"`t"+$get+"`t"+$Uri)
         }
         elseif($response.StatusCode -eq 401){
+            (GetToken);
             Write-Log -Level Info -Message "Token has been expired"
             Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-            (GetToken);
-            return (GetWebRequest $Uri $get)
+            $_result= (GetWebRequest $Uri $get)
         }
 		elseif($response.StatusCode -eq 404){
             Write-Log -Level Info -Message "No object found(s)"
@@ -292,7 +295,7 @@ function GetWebRequest($Uri, $get, $InFile, $OutFile)
             Write-Log -Level Info -Message ("Status Code: "+$response.StatusDescription+" "+$Uri+" "+$get)
             Write-Log -Level Info -Message "ERROR GetWebRequest else block";
         }
-        return $response
+        $_result= $response
     }
     catch
     {
@@ -300,6 +303,7 @@ function GetWebRequest($Uri, $get, $InFile, $OutFile)
 		Write-Output  $response
         return $null;
     }
+	return CheckGetData($_result);
 }
 
 
@@ -317,13 +321,13 @@ function GetToken
 function GetCloudFileMetaData($fileName,$cName=$ContainerName)
 {
     Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
-    return   CheckGetData((GetWebRequest ($StorageUri+$cName+'/'+$fileName) Head))
+    return   (GetWebRequest ($StorageUri+$cName+'/'+$fileName) Head)
 }
 
 function ListCloudFiles($cName=$ContainerName)
 {
      Write-Log -Level Info -Message "Getting file list from cloud"
-	 return   CheckGetData((GetWebRequest $StorageUri$cName  Get))
+	 return   (GetWebRequest $StorageUri$cName  Get)
 }
 
 function CheckGetData($result){
@@ -357,7 +361,7 @@ function ConvertTextToObject($_result){
 
 function ListContainers()
 {
-    return  CheckGetData((GetWebRequest $OracleApiUri'v1/'$StorageAccountName"?limit=15"  Get))
+    return  (GetWebRequest $OracleApiUri'v1/'$StorageAccountName"?limit=15"  Get)
 }
 
 function ManifestFile($remoteFile, $cName=$ContainerName)
@@ -370,7 +374,7 @@ function ManifestFile($remoteFile, $cName=$ContainerName)
     if($file.Contains("application/x-www-form-urlencoded;charset=UTF-8"))
     {
         #has manifestfile
-        return CheckGetData((GetWebRequest $ssUri  Get))
+        return (GetWebRequest $ssUri  Get)
     }
     else
     {
@@ -417,9 +421,8 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     }
     $ssUri= ($StorageUri+$cName+'/'+$toUploadFileName)
 
-	if((HasFileOnTheCloud -cName $cName -localFile $localfilePath) -eq $true)
+	if((HasFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true)
 	{
-		Write-Log -Level Info -Message ("By-passed, file already has on the cloud "+$toUploadFileName);
 		return $true;
 	}
 
@@ -434,34 +437,36 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     }
     else
     {
-        Write-Log -Level Warn -Message "Error occured while file uploading"
+        Write-Log -Level Warn -Message ("Error occured while file uploading"+$response.StatusDescription)
 		return $false;
     }
 }
 
-function HasFileOnTheCloud($cName, $localFile)
+function HasFileOnTheCloud($cName, $localFile, $toUploadFileName)
 {
 	$errorFlag=0;	
-	$cloudFile= (GetCloudFileMetaData -cName $cName -fileName $localFile.Name)
+	$cloudFile= (GetCloudFileMetaData -cName $cName -fileName $toUploadFileName)
+	$_file= (Get-ChildItem $localFile);
+
 	if($cloudFile -ne $null)
 	{
 		#these files length are same
-		if([long]$cloudFile."Content-Length" -ne $localFile.Length)        
+		if([long]$cloudFile."Content-Length" -ne $_file.Length)        
 		{   
-			Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Length)+" "+$cloudFile."Content-Length" +" <> "+$localFile.Length)
+			Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Length)+" "+$cloudFile."Content-Length" +" <> "+$_file.Length)
 			$errorFlag=1
 		}
 		
 		#as we expect the date of these files
-		if([datetime]$cloudFile."Last-Modified" -lt $localFile.LastAccessTimeUtc)
+		if([datetime]$cloudFile."Last-Modified" -lt $_file.LastAccessTimeUtc)
 		{
-			Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.LastWriteTimeUtc)+" "+$cloudFile."Last-Modified"+" <= "+ $localFile.LastWriteTimeUtc)
+			Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.LastWriteTimeUtc)+" "+$cloudFile."Last-Modified"+" <= "+ $_file.LastWriteTimeUtc)
 			$errorFlag=1
 		}
 
 		if($errorFlag -eq 0)
 		{
-			Write-Log -Level Info -Message ("By-passing, file already has on the cloud "+($localFile.Name));
+			Write-Log -Level Info -Message ("By-passing, file already has on the cloud "+($_file.Name));
 			return $true;
 		}	
 	}
@@ -473,22 +478,16 @@ function UploadAll($cName=$ContainerName, $LocalFilePath="E:\Pictures", $extensi
     $i=1;
     $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Measure-Object ).Count;
 
-    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | sort LastWriteTimeUtc  | Foreach-Object {
+    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | sort LastWriteTimeUtc -Descending  | Foreach-Object {
         Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount)*100)
-       
-		if((HasFileOnTheCloud -cName $cName -localFile $_) -eq $false)
-		{
-			 UploadFile -cName $cName -localfile $_.FullName
-		}
+		UploadFile -cName $cName -localfilePath $_.FullName
 		
     $i=$i+1;
     }
 }
 
  
-UploadAll -cName 'compute_images' -extension "*" -LocalFilePath 'J:\BACKUP\'
-
-
+UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
 
 
 
