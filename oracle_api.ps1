@@ -8,6 +8,7 @@ $extension='*'
 # END Parameters
 
 
+
 <#
 
 .EXAMPLE
@@ -40,6 +41,8 @@ $extension='*'
     UploadFile {your file path} {container}
 	UploadFile -cName "compute_images" -localfilePath E:\Pictures\download.jpg -toUploadFileName "renameddownload.jpg"
     UploadFile "C:\Users\can.kaya\Downloads\abba.png" compute_images
+.EXAMPLE
+	UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
 
 #>
 
@@ -257,12 +260,13 @@ function GetWebRequest($Uri, $get, $InFile, $OutFile)
     $headers["X-Auth-Token"] = $script:AuthToken;
     try
     {
-        Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri)
         if($InFile)
         {
+			Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri+"-InFile"+  $InFile)
             $response = Invoke-WebRequest -Method $get -Headers $headers $Uri -InFile  $InFile
         }
         else{
+			Write-Log -Level Info ("Invoke-WebRequest -Method "+ $get+" -Headers [""X-Auth-Token""]"+$headers["X-Auth-Token"]+" "+ $Uri)
             $response = Invoke-WebRequest -Method $get -Headers $headers $Uri
         }
         
@@ -293,6 +297,7 @@ function GetWebRequest($Uri, $get, $InFile, $OutFile)
     catch
     {
         Write-Log -Level Warn -Message ($_.Exception.Message)
+		Write-Output  $response
         return $null;
     }
 }
@@ -412,6 +417,12 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     }
     $ssUri= ($StorageUri+$cName+'/'+$toUploadFileName)
 
+	if((HasFileOnTheCloud -cName $cName -localFile $localfilePath) -eq $true)
+	{
+		Write-Log -Level Info -Message ("By-passed, file already has on the cloud "+$toUploadFileName);
+		return $true;
+	}
+
     Write-Log -Level Info -Message (" Starting to upload "+$localfilePath +"' as named "+$toUploadFileName+ " to cloud")
 
     $response = GetWebRequest -Uri  $ssUri -get PUT -InFile $localfilePath
@@ -428,63 +439,57 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     }
 }
 
- 
+function HasFileOnTheCloud($cName, $localFile)
+{
+	$errorFlag=0;	
+	$cloudFile= (GetCloudFileMetaData -cName $cName -fileName $localFile.Name)
+	if($cloudFile -ne $null)
+	{
+		#these files length are same
+		if([long]$cloudFile."Content-Length" -ne $localFile.Length)        
+		{   
+			Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Length)+" "+$cloudFile."Content-Length" +" <> "+$localFile.Length)
+			$errorFlag=1
+		}
+		
+		#as we expect the date of these files
+		if([datetime]$cloudFile."Last-Modified" -lt $localFile.LastAccessTimeUtc)
+		{
+			Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.LastWriteTimeUtc)+" "+$cloudFile."Last-Modified"+" <= "+ $localFile.LastWriteTimeUtc)
+			$errorFlag=1
+		}
 
-
+		if($errorFlag -eq 0)
+		{
+			Write-Log -Level Info -Message ("By-passing, file already has on the cloud "+($localFile.Name));
+			return $true;
+		}	
+	}
+    return $false;
+}
 
 function UploadAll($cName=$ContainerName, $LocalFilePath="E:\Pictures", $extension="*")
 {
-    $errorFlag=0;
     $i=1;
     $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Measure-Object ).Count;
 
-    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | sort LastWriteTimeUtc -Descending | Foreach-Object {
+    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | sort LastWriteTimeUtc  | Foreach-Object {
         Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount)*100)
-        $cloudFile= (GetCloudFileMetaData -cName $cName -fileName $_.Name)
-        #there is a file with same name on the cloud
-        if($cloudFile -ne $null)
-        {
-            #these files length are same
-            if([long]$cloudFile."Content-Length" -ne $_.Length)        
-            {   
-                Write-Log -Level Info -Message ("Content Lengths are not matched! "+($_.Length)+" "+$cloudFile."Content-Length" +" <> "+$_.Length)
-                $errorFlag=1
-            }
-			
-            #as we expect the date of these files
-            if([datetime]$cloudFile."Last-Modified" -lt $_.LastAccessTimeUtc)
-            {
-                Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for "+($_.LastWriteTimeUtc)+" "+$cloudFile."Last-Modified"+" <= "+ $_.LastWriteTimeUtc)
-                $errorFlag=1
-            }
-
-            if($errorFlag -eq 0)
-            {
-                Write-Log -Level Info -Message ("By-passing, file already has on the cloud "+($_.Name));
-            }
-        }
-        else
-        {
-            if($errorFlag -eq 0)
-            {
-                if(!(UploadFile -cName $cName -localfile $_.FullName))
-				{
-					Write-Log -Level Warn -Message "an error occured while uploading op"
-				}
-            }
-        }
-
-    if($errorFlag -eq 1)
-    {
-        Write-Host "Houston we have a problem :)"
-        break;
-    }
+       
+		if((HasFileOnTheCloud -cName $cName -localFile $_) -eq $false)
+		{
+			 UploadFile -cName $cName -localfile $_.FullName
+		}
+		
     $i=$i+1;
     }
 }
 
  
 UploadAll -cName 'compute_images' -extension "*" -LocalFilePath 'J:\BACKUP\'
+
+
+
 
 
 
