@@ -5,7 +5,6 @@ $IdentityDomain = 'youridentitydomainNAme'
 # END Parameters
 
 
-
 $ContainerName='testContainer';
 $LocalFilePath='E:\Pictures'
 $extension='*'
@@ -334,13 +333,14 @@ function CheckGetData($result){
 	$_result;
     if($result -ne $null -and [bool]($result.PSobject.Properties.name -match "RawContent")){
         if($result.Content.gettype().Name -eq 'String'){
-            $_result=  $result.Content;
+            $_result=  $result.Content.Split("`r`n");
         }elseif($result.Content.gettype().Name -eq 'Byte[]')
         {
-            $_result= $result.RawContent;
+            $_result= ConvertTextToObject($result.RawContent);
         }
 	 }
-	 return ConvertTextToObject($_result);
+    
+	 return ($_result);
 }
 
 function ConvertTextToObject($_result){
@@ -371,16 +371,16 @@ function ManifestFile($remoteFile, $cName=$ContainerName)
     Write-Host $ssUri
     Write-Log -Level Info -Message ("Starting to download "+$remoteFile +" from the cloud")
     $file = GetCloudFileMetaData $remoteFile $cName
-    if($file.Contains("application/x-www-form-urlencoded;charset=UTF-8"))
-    {
+    #if($file.Contains("application/x-www-form-urlencoded;charset=UTF-8"))
+    #{
         #has manifestfile
         return (GetWebRequest $ssUri  Get)
-    }
-    else
-    {
-        Write-Log -Level Warn -Message (" "+$remoteFile +" doesn't have manifest file")
-        return $null
-    }
+   # }
+    #else
+    #{
+   #     Write-Log -Level Warn -Message (" "+$remoteFile +" doesn't have manifest file")
+    #    return $null
+   # }
 }
 
 # DO NOT USE THIS METHOD
@@ -396,7 +396,7 @@ function DeleteFileFromCloud($fileName,$cName=$ContainerName, $overrideAllYes=$f
     if($confirmation -eq "y")
     {
         $result= (GetWebRequest ($StorageUri+$cName+'/'+$fileName)  Delete) 
-        Write-Host $result 
+        
         if($result.StatusCode -eq 204){
 			Write-Log -Level Info -Message "File deletion succeeded"
 			return $true;
@@ -412,7 +412,7 @@ function DeleteFileFromCloud($fileName,$cName=$ContainerName, $overrideAllYes=$f
     }
 }
 
-function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
+function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName, $isManifest)
 {
     #TODO: We must consider replace the file which has already in there this method overrides now
     if(!$toUploadFileName)
@@ -421,14 +421,21 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     }
     $ssUri= ($StorageUri+$cName+'/'+$toUploadFileName)
 
-	if((HasFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true)
-	{
-		return $true;
-	}
+    if(!$isManifest){
+
+	    if((HasFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true)
+	    {
+		    return $true;
+	    }
+    }
+    else{
+        $ssUri= $ssUri+"?multipart-manifest=put"
+    }
+	
 
     Write-Log -Level Info -Message (" Starting to upload "+$localfilePath +"' as named "+$toUploadFileName+ " to cloud")
 
-    $response = GetWebRequest -Uri  $ssUri -get PUT -InFile $localfilePath
+    $response = GetWebRequest -Uri  $ssUri -get PUT -InFile $localfilePath 
 
     if($response.StatusCode -eq 201)
     {
@@ -438,6 +445,7 @@ function UploadFile($localfilePath, $toUploadFileName, $cName=$ContainerName)
     else
     {
         Write-Log -Level Warn -Message ("Error occured while file uploading"+$response.StatusDescription)
+        Write-Output $response
 		return $false;
     }
 }
@@ -486,9 +494,66 @@ function UploadAll($cName=$ContainerName, $LocalFilePath="E:\Pictures", $extensi
     }
 }
 
+function BigFileUpload($localfilePath){
+    $localFile = 	(get-item $localfilePath)
+    $TargetPath = $localFile.Directory.FullName+"\_"+([guid]::NewGuid()).ToString()
+    if( -Not (Test-Path -Path $TargetPath ) )
+    {
+        New-Item -ItemType directory -Path $TargetPath
+    }
+    
+
+    $re = $PSScriptRoot+'\gfs101\gfsplit.exe'
+    $arg1 = $localfilePath
+    $arg2 = $TargetPath+"\"+$localFile.Name+"_"
+    $arg3 = 15000
+    & $re $localfilePath $arg2 $arg3
+
+    Remove-Item -Path $($TargetPath+"\"+($localFile.Name)+"_.bat") 
+
+    UploadAll -LocalFilePath $TargetPath -cName testContainer -extension "*"
+    CretaManifestFileForBigFile $TargetPath
+
+
+    #Remove-Item $TargetPath -Recurse
+
+	#Create a new folder x
+	#split it x
+	#delete or donta upload bat file x
+	#upload them
+	#check etag and sizes
+	#delete folder
+}
+
+function SplitFilesWithgfsplit($localPath, $filePath, [int]$SplitSize){
+
+
+}
+
+function CreatManifestFileForBigFile($localPath, $FileName, $cName=$ContainerName){
+
+$arr = Get-ChildItem  $localPath    | Foreach-Object {$_.Name}
+$Falloutlist = @()
+$ManifestPath = $($localPath+"/"+$FileName+".manifest.json")
  
-UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
+ foreach($f in $arr){
+    $file = GetCloudFileMetaData -fileName $f -cName compute_images
+    if($file.StatusCode -eq 200){
+      $CurrentItem = New-Object system.Object
+		$CurrentItem | Add-Member -type Noteproperty -Name path -Value compute_images/$f
+		$CurrentItem | Add-Member -type Noteproperty -Name etag -Value $file.Etag
+        $CurrentItem | Add-Member -type Noteproperty -Name size_bytes -Value $file."Content-Length".Replace("""","")
+        		
+        $Falloutlist = $Falloutlist + $CurrentItem
+    }
+    }
+    $Falloutlist| convertto-json >  $ManifestPath
 
+     
+    #UploadFile -isManifest $true -cName $cName -localfilePath $($ManifestPath+"/"+$FileName)
+  
+    return $true
+}
 
-
-
+ 
+ 
