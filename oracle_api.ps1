@@ -243,54 +243,86 @@ function GetCloudFileDetail($fileName, $cName = $ContainerName) {
 }
 
 
+
+function __UploadFile($localfilePath, $toUploadFileName, $cName = $ContainerName) {
+    $response = "";
+    $ssUri = ($StorageUri + $cName + '/' + $toUploadFileName)
+    try { 
+         
+        Write-Log -Level Info -Message (" Starting to upload " + $localfilePath + "' as named " + $toUploadFileName + " to cloud")
+        $object = Invoke-WebRequest -Method PUT -Headers $internalheaders $ssUri -InFile $localfilePath 
+    } 
+    catch {
+        $response = $_.Exception.Response
+    }
+    #Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
+    if ($object.StatusCode -eq 201) {
+        Write-Log -Level Info -Message (" File successfully uploaded.`t" + ($object.StatusDescription) + "`tPUT`t" + ($StorageUri + $cName + '/' + ($toUploadFileName.Name)))
+        return $true;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        (GetToken);
+        Write-Log -Level Info -Message "Token has been expired"
+        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
+        __UploadFile $localfilePath $toUploadFileName $cName
+    }
+    else {
+        Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
+        Write-Output $object
+        return $false;
+    }
+}
+
 function _UploadFile($localfilePath, $toUploadFileName, $cName = $ContainerName) {
+    $_file = (Get-ChildItem $localfilePath)
+    $_RealFileName = $_file.Name
     #TODO: We must consider replace the file which has already in there this method overrides now
     if (!$toUploadFileName) {
-        $toUploadFileName = (Get-ChildItem $localfilePath).Name
+        $toUploadFileName = $_file.Name
     }
-    $ssUri = ($StorageUri + $cName + '/' + $toUploadFileName)
-
-
-
+    
     if ((HasSpecificFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true) {
         Write-Log -Level Info -Message ("you already have this File")
         return $true;
     }
 
+    if ($_file.Length -gt 10000000) {
+        $prefix = _splitFile $localfilePath 10000000 
+        #$guid = ($localfilePath + $prefix.GuidName)
 
+        foreach ($chunkfile in $prefix.FileList) {
+            __UploadFile -cName $cName -localfilePath $chunkfile -toUploadFileName $toUploadFileName
+        }
 
+        $lastObjectName = Split-Path $prefix.FileList[-1] -leaf
+        _SetMarker -cName compute_images -filename $lastObjectName.Name -prefix $prefix.GuidName -_RealFileName $_RealFileName
+        _CreatevirtualFile -cName compute_images -prefix $prefix.GuidName -LastLocalFileModifiedDate $_file.LastWriteTime.ToUniversalTime() -_RealFileName $_RealFileName
+    
 
-
-    Write-Log -Level Info -Message (" Starting to upload " + $localfilePath + "' as named " + $toUploadFileName + " to cloud")
-    $response = Invoke-WebRequest -Method PUT -Headers $internalheaders $ssUri -InFile $localfilePath 
-
-    if ($response.StatusCode -eq 201) {
-        Write-Log -Level Info -Message (" File successfully uploaded.`t" + ($response.StatusDescription) + "`tPUT`t" + ($StorageUri + $cName + '/' + ($toUploadFileName.Name)))
-        return $true;
-    }
-    elseif ($continers.StatusCode -eq 401) {
-        (GetToken);
-        _UploadFile $localfilePath $toUploadFileName $cName
+        foreach ($chunkfile in $prefix.FileList) {
+            Remove-Item -Path $chunkfile
+        }
+  
     }
     else {
-        Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
-        Write-Output $response
-        return $false;
+        __UploadFile -cName $cName -localfilePath $localfilePath -toUploadFileName $toUploadFileName
     }
 }
 
 function UploadAll($cName = $ContainerName, $LocalFilePath = "E:\Pictures", $extension = "*") {
     
     $i = 1;
-    $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | where length -lt 5000000000 | Measure-Object ).Count;
+    $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension  | Measure-Object ).Count;
 
-    $files = Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension |where length -lt 5000000000 | Sort-Object LastWriteTimeUtc -Descending  | Foreach-Object {
+    Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Sort-Object LastWriteTimeUtc -Descending  | Foreach-Object {
         Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount) * 100)
         _UploadFile -cName $cName -localfilePath $_.FullName
+        
 		
         $i = $i + 1;
     }
 }
+
 
 function HasSpecificFileOnTheCloud($cName, $localFile, $toUploadFileName) {
     $_file = (Get-ChildItem $localFile)
@@ -300,9 +332,6 @@ function HasSpecificFileOnTheCloud($cName, $localFile, $toUploadFileName) {
     }
     $errorFlag = 0;	
     $cloudFile = (GetCloudFileMetaData -cName $cName -fileName $toUploadFileName)
-    
-    
-     
 
     if ($cloudFile -ne $null) {
         #these files length are same
@@ -356,7 +385,7 @@ function DeleteFileFromCloud($fileName, $cName = $ContainerName, $overrideAllYes
     
     if ($confirmation -eq "y") {
         $files = GetCloudFileDetail $fileName $cName
-        if ($files.GetType() | where Name -eq "String") {
+        if ($files.GetType() | Where-Object Name -eq "String") {
             #multipart
             $([xml]$files).SelectNodes('//container/object') | ForEach-Object {
                 _DeleteFileFromCloud $_.name $cName
@@ -420,23 +449,9 @@ function _CreatevirtualFile($cName = $ContainerName, $prefix, $LastLocalFileModi
     }
 }
 
-function BigFileUpload($localfilePath) {
-    $_RealFileName = Split-Path $localfilePath -leaf
-    $prefix = _splitFile $localfilePath 10000000 
-    
-    $guid = ($localfilePath + $prefix)
-    UploadAll -LocalFilePath ($guid + "*") -cName compute_images -extension "*"
 
-    $lastObjectName = Get-ChildItem $guid*  -File | Sort-Object Length | Select Name, LastWriteTime -First 1
-    _SetMarker -cName compute_images -filename $lastObjectName.Name -prefix $prefix -_RealFileName $_RealFileName
-    _CreatevirtualFile -cName compute_images -prefix $prefix -LastLocalFileModifiedDate $lastObjectName.LastWriteTime.ToUniversalTime() -_RealFileName $_RealFileName
-
-
-    Remove-Item -Path $localfilePath$prefix*
-}
-
- 
 function _splitFile($inFile, [Int32] $bufSize) {
+    [System.Collections.ArrayList]$fileList = @() 
     $localFile = (get-item $inFile) 
     $_guid = ([guid]::NewGuid()).ToString().Replace("-", "")
     $_guid = "EB7A645290604987A8593CF7224B6A3D" #forcloudberry
@@ -444,43 +459,25 @@ function _splitFile($inFile, [Int32] $bufSize) {
     $outPrefix = $localFile.FullName + $guidName.ToUpper() 
     $stream = [System.IO.File]::OpenRead($inFile)
   
-    $chunkNum = 1
+    $chunkNum = 0
     $barr = New-Object byte[] $bufSize
 
     while ( $bytesRead = $stream.Read($barr, 0, $bufsize)) {
         $outFile = ($outPrefix + $chunkNum.ToString().PadLeft(6, '0'))
+        $fileList.Add($outFile) | Out-Null
         $ostream = [System.IO.File]::OpenWrite($outFile)
         $ostream.Write($barr, 0, $bytesRead);
         $ostream.close();
         $chunkNum += 1
     }
-    return $guidName;
+    $returnOject = "" 
+    $returnOject = $returnOject| Add-Member @{GuidName = $guidName}  -PassThru
+    $returnOject = $returnOject|Add-Member @{FileList = $fileList} -PassThru
+   
+    return $returnOject;
 }
 
-function CreatManifestFileForBigFile($localPath, $FileName, $cName = $ContainerName) {
 
-    $arr = Get-ChildItem  $localPath    | Foreach-Object {$_.Name}
-    $Falloutlist = @()
-    $ManifestPath = $($localPath + "/" + $FileName + ".manifest.json")
- 
-    foreach ($f in $arr) {
-        $file = GetCloudFileMetaData -fileName $f -cName compute_images
-        if ($file.StatusCode -eq 200) {
-            $CurrentItem = New-Object system.Object
-            $CurrentItem | Add-Member -type Noteproperty -Name path -Value compute_images/$f
-            $CurrentItem | Add-Member -type Noteproperty -Name etag -Value $file.Etag
-            $CurrentItem | Add-Member -type Noteproperty -Name size_bytes -Value $file."Content-Length".Replace("""", "")
-        		
-            $Falloutlist = $Falloutlist + $CurrentItem
-        }
-    }
-    $Falloutlist| convertto-json >  $ManifestPath
-
-     
-    #UploadFile -isManifest $true -cName $cName -localfilePath $($ManifestPath+"/"+$FileName)
-  
-    return $true
-}
 
 
  
@@ -512,7 +509,30 @@ UploadAll -cName "compute_images" -extension "*" -LocalFilePath "D:\Setup\SSRS_R
 
 
 
+# function CreatManifestFileForBigFile($localPath, $FileName, $cName = $ContainerName) {
 
+#     $arr = Get-ChildItem  $localPath    | Foreach-Object {$_.Name}
+#     $Falloutlist = @()
+#     $ManifestPath = $($localPath + "/" + $FileName + ".manifest.json")
+ 
+#     foreach ($f in $arr) {
+#         $file = GetCloudFileMetaData -fileName $f -cName compute_images
+#         if ($file.StatusCode -eq 200) {
+#             $CurrentItem = New-Object system.Object
+#             $CurrentItem | Add-Member -type Noteproperty -Name path -Value compute_images/$f
+#             $CurrentItem | Add-Member -type Noteproperty -Name etag -Value $file.Etag
+#             $CurrentItem | Add-Member -type Noteproperty -Name size_bytes -Value $file."Content-Length".Replace("""", "")
+        		
+#             $Falloutlist = $Falloutlist + $CurrentItem
+#         }
+#     }
+#     $Falloutlist| convertto-json >  $ManifestPath
+
+     
+#     #UploadFile -isManifest $true -cName $cName -localfilePath $($ManifestPath+"/"+$FileName)
+  
+#     return $true
+# }
 
 
 
