@@ -1,14 +1,8 @@
-﻿Import-Module -Name ($PSScriptRoot + "\libs.ps1")
-# BEGIN Parameters
-$UserEmail='xxx@email.com'
-$UserPass = 'password'
-$IdentityDomain = 'youridentitydomainNAme'
+﻿# BEGIN Parameters
+$UserEmail = 'ondermurat85@gmail.com'
+$UserPass = 'iBm1nd3r*'
+$IdentityDomain = 'linkpluscloud'
 # END Parameters
-
-
-$ContainerName='testContainer';
-$LocalFilePath='E:\Pictures'
-$extension='*'
 
 
 <#
@@ -47,6 +41,463 @@ $extension='*'
 	UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
 
 #>
+
+$StorageAccountName = 'Storage-' + $IdentityDomain
+$OracleApiUri = 'https://' + $IdentityDomain + '.eu.storage.oraclecloud.com/'
+$AuthUri = $OracleApiUri + 'auth/v1.0'
+$StorageUri = $OracleApiUri + "v1/" + $StorageAccountName + '/'
+$XStorageUser = $StorageAccountName + ':' + $UserEmail
+$AuthToken = ''
+
+$internalheaders = @{} 
+
+function GetToken {  
+    $headers_ = @{}
+    $headers_["X-Storage-User"] = $XStorageUser
+    $headers_["X-Storage-Pass"] = $UserPass
+    #$headers_["Content-Type"]= "text/plain;charset=UTF-8" 
+    Write-Log -Level Info -Message "Getting new Token"
+    $script:AuthToken = (Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri).Headers["X-Auth-Token"].ToString();
+    $script:internalheaders["X-Auth-Token"] = $script:AuthToken;	 
+    Write-Log -Level Info -Message $("New Token's value is " + ($script:AuthToken))
+}
+
+function RefreshToken {
+    (GetToken);
+    Write-Log -Level Info -Message "Token has been expired"
+    Write-Log -Level Warn -Message ("Old Token's value is "+$script:AuthToken)
+}
+
+function _GetCloudFilePrefix($cName, $prefix) {
+    $response = "";
+    try { 
+        #compute_images?prefix=Pictures%2F2%2F&limit=1000&delimiter=%2F&format=xm
+        $object = Invoke-WebRequest -Method GET -Headers $internalheaders ($StorageUri + $cName + '?prefix=' + $prefix + "&delimiter=%2F&format=xml") 
+    } 
+    catch {
+        $response = $_.Exception.Response
+    }
+    #Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
+    if ($object.StatusCode -eq 200) {
+        return $object.Content;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        _GetCloudFilePrefix $cName $prefix
+    }
+}
+
+function _SetMarker($cName , $LastFilePath, $prefix, $_RealFileName) {
+    $response = "";
+    try { 
+        
+        Write-Log -Level Info -Message ($StorageUri + $cName + "?marker=" + $LastFilePath + "&prefix=" + $_RealFileName + $prefix + "&delimiter=%2F&format=xml")
+        $object = Invoke-WebRequest -Method GET -Headers $internalheaders ($StorageUri + $cName + "?marker=" + $LastFilePath + "&prefix=" + $_RealFileName + $prefix + "&delimiter=%2F&format=xml")
+    } 
+    catch {
+        Write-Log -Level Warn -Message ("An error occured while setting marker " + $LastFilePath)
+        $response = $_.Exception.Response
+    }
+    
+    if ($object.StatusCode -eq 200) {
+        Write-Log -Level Info -Message ("setting " + $LastFilePath + "'s marker to cloud")
+        return $object;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        _SetMarker $cName $LastFilePath $prefix $_RealFileName
+    }
+}
+
+function _GetUploadName($localFilePath) {
+    #TODO: We must consider replace the file which has already in there this method overrides now
+    #return $localFilePath.Name
+    return $localFilePath.FullName.Substring(3, $localFilePath.FullName.Length - 3).Replace("\", "/")
+      
+}
+
+function _CreatevirtualFile($cName , $prefix, $LastLocalFileModifiedDate, $_RealFileName) {
+    $response = "";
+    try { 
+        $_RealFileName = $_RealFileName.Replace("/","%2F")
+        #compute_images/Pictures%2F2%2FSSRS_ReportCount.pbix!CB_EB7A645290604987A8593CF7224B6A3D_
+        $createHeader = $internalheaders;
+        $createHeader.Add("X-Object-Meta-Cb-Modifiedtime", $LastLocalFileModifiedDate)
+        $createHeader.Add("X-Object-Manifest", ($cName + "/" + $_RealFileName + $prefix))
+        $createHeader.Add("Content-Length", "0")
+        Write-Log -Level Info -Message ("Manifest-> "+($cName + "/" + $_RealFileName + $prefix))
+        Write-Log -Level Info -Message ($StorageUri + $cName + "/" + $_RealFileName)
+        $object = Invoke-WebRequest -Method PUT -Headers $createHeader ($StorageUri + $cName + "/" + $_RealFileName)
+    } 
+    catch {
+        Write-Log -Level Warn -Message ("An error occured while creating virtualfile" + $_RealFileName)
+        Write-Log -Level Error -Message $_.Exception.Response
+        $response = $_.Exception.Response
+    }
+    
+    if ($object.StatusCode -eq 201) {
+        Write-Log -Level Info -Message ("created " + $_RealFileName + "'s virtual file")
+        return $object;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        _CreatevirtualFile $cName $prefix $LastLocalFileModifiedDate $_RealFileName
+    }
+}
+
+
+
+#this code block copied from https://github.com/zincarla/FileSplitter.ps1
+function _splitFile($LoadFile, [Int32] $bufSize) {
+    [System.Collections.ArrayList]$fileList = @() 
+    $ReadBuffer = 4096
+    #Convert from MB to KB to B
+    $SegmentSize = $bufSize
+    #Initialize read buffer
+    $Buffer = New-Object Byte[] $ReadBuffer
+    #Amount read in a pass.
+    $AmtRead = $null
+    #Current file segment
+    $I = 1;
+
+    #DateTime for update
+    $LastUpdate = [DateTime]::Now
+    $localFile = (get-item $LoadFile) 
+    #$_guid = ([guid]::NewGuid()).ToString().Replace("-", "")
+    $_guid = "EB7A645290604987A8593CF7224B6A3D" #forcloudberry
+    $guidName = ("!CB_" + $_guid + "_") #forcloudberry
+    $SaveFile = $localFile.FullName + $guidName.ToUpper()
+
+    Write-Progress -Activity "Splitting" -Status "Starting" -PercentComplete 0
+    $StreamReader = New-Object System.IO.FileStream -ArgumentList @($LoadFile, [System.IO.FileMode]::Open)
+    $StreamWriter = New-Object System.IO.FileStream -ArgumentList @(($SaveFile + $I.ToString().PadLeft(6, '0')), [System.IO.FileMode]::Create)
+    $fileList.Add(($SaveFile + $I.ToString().PadLeft(6, '0'))) | Out-Null
+    #CurrentSize of the file segment we are working on.
+    $TotalSize = $StreamReader.Length
+    $CurrentTotal = 0
+    $CurrentSize = 0
+    while ($AmtRead -ne 0 -or $AmtRead -eq $null) {
+        #Read the file to memory
+        $AmtRead = $StreamReader.Read($Buffer, 0, $ReadBuffer)
+        if ($AmtRead -gt 0) {
+            #Write the file to the file segment
+            $StreamWriter.Write($Buffer, 0, $AmtRead);
+            $CurrentSize += $AmtRead;
+            $CurrentTotal += $AmtRead;
+            if ([DateTime]::Now - $LastUpdate -gt [TimeSpan]::FromSeconds(5)) {
+                Write-Progress -Activity "Splitting" -Status "Writing" -PercentComplete (($CurrentTotal * 100) / $TotalSize)
+                $LastUpdate = [DateTime]::Now
+            }
+        }
+        if ($CurrentSize -ge $SegmentSize) {
+            #Once the current segment is larger or equal to the specified size, finish the file and start a new segment.
+            $CurrentSize = 0;
+            $StreamWriter.Close();
+            $I++;
+            $fileList.Add(($SaveFile + $I.ToString().PadLeft(6, '0'))) | Out-Null
+            $StreamWriter = New-Object System.IO.FileStream -ArgumentList @(($SaveFile + $I.ToString().PadLeft(6, '0')), [System.IO.FileMode]::Create)
+            Write-Progress -Activity "Splitting" -Status "New-File" -PercentComplete (($CurrentTotal * 100) / $TotalSize)
+        }
+    }
+    #CleanUp
+    $StreamWriter.Close();
+    $StreamReader.Close();
+    $returnOject = "" 
+    $returnOject = $returnOject| Add-Member @{FileFullName = $localFile.FullName}  -PassThru
+    $returnOject = $returnOject| Add-Member @{GuidName = $guidName}  -PassThru
+    $returnOject = $returnOject|Add-Member @{FileList = $fileList} -PassThru
+   
+    return $returnOject;
+    Write-Progress -Activity "Splitting" -Status "Completed" -PercentComplete 100 -Completed
+}
+
+function __UploadFile($localfilePath, $toUploadFileName, $cName ) {
+    $response = "";
+    $ssUri = ($StorageUri + $cName + '/' + $toUploadFileName)
+    Write-Log -Level Info -Message $ssUri
+    try { 
+         
+        Write-Log -Level Info -Message (" Starting to upload " + $localfilePath + "' as named " + $toUploadFileName + " to cloud")
+        $object = Invoke-WebRequest -Method PUT -Headers $internalheaders $ssUri -InFile $localfilePath 
+    } 
+    catch {
+        $response = $_.Exception.Response
+    }
+    #Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
+    if ($object.StatusCode -eq 201) {
+        Write-Log -Level Info -Message (" File successfully uploaded.`t" + ($object.StatusDescription) + "`tPUT`t" + ($StorageUri + $cName + '/' + ($toUploadFileName)))
+        return $true;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        __UploadFile $localfilePath $toUploadFileName $cName
+    }
+    else {
+        Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
+        Write-Output $object
+        return $false;
+    }
+}
+
+function _DeleteFileFromCloud($fileName, $cName ) {
+    $result = Invoke-WebRequest -Method DELETE -Headers $internalheaders ($StorageUri + $cName + '/' + $fileName)
+    if ($result.StatusCode -eq 204) {
+        Write-Log -Level Info -Message "File deletion succeeded"
+        return $true;
+    }
+    elseif ($continers.StatusCode -eq 401) {
+        (GetToken);
+        _DeleteFileFromCloud $fileName $cName
+    }
+    else {
+        Write-Log -Level Info -Message "Error! File couldnt delete"
+        return $false;
+    }
+}
+
+function ListContainers() {
+    $response = "";
+    $internalheaders["Content-Type"] = "application/xml;charset=utf8"
+    try { 
+        $continers = Invoke-WebRequest -Method GET -Headers $internalheaders $OracleApiUri'v1/'$StorageAccountName"?limit=15&delimiter=%2F&format=xml"
+    } 
+    catch {
+        $response = $_.Exception.Response
+    }
+
+    if ($continers.StatusCode -eq 200) {
+        $([xml]$continers.Content).SelectNodes('//account/container') | ForEach-Object {
+            Write-Host $_.name
+        }
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        ListContainers
+    }
+   
+}
+
+function ListCloudFiles($cName) {
+    $response = "";
+
+    try { 
+        $files = Invoke-WebRequest -Method GET -Headers $internalheaders $StorageUri$cName"?limit=1000&delimiter=%2F&format=xml" 
+    } 
+    catch {
+        $response = $_.Exception.Response
+    }
+     
+    [System.Collections.ArrayList]$FileListToBeShown = @()  
+    $tempManifestFile = "";
+        
+    if ($files.StatusCode -eq 200) {
+
+        $([xml]$files.Content).SelectNodes('//container/object') | ForEach-Object {
+            #Write-Host $_.name $_.hash $_.bytes $_.last_modified
+            $FileListToBeShown.Add($_.name+"`t`t"+($_.bytes/1024/1024)+"MB")| Out-Null
+            if ($_.bytes -eq 0) {
+                $object = GetCloudFileMetaData $_.name $cName
+                $tempManifestFile = $object.Headers["X-Object-Manifest"].Replace($cName + "/", "").Replace("%21", "!") #TODO ASCII Replace
+            }
+             
+            if ($_.name.Contains($tempManifestFile)) {
+                $FileListToBeShown.Remove($_.name) | Out-Null
+            }
+            
+        }
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        ListCloudFiles $cName
+    }
+
+    $FileListToBeShown
+}
+
+function GetCloudFileMetaData($fileName, $cName) {
+    $response = "";
+    try { 
+        $object = Invoke-WebRequest -Method HEAD -Headers $internalheaders ($StorageUri + $cName + '/' + $fileName)
+    } 
+    catch {
+        Write-Log -Level Warn -Message ("An error occured while getting " + $fileName + "'s metadata from cloud")
+        $response = $_.Exception.Response
+    }
+    
+    if ($object.StatusCode -eq 200) {
+        Write-Log -Level Info -Message ("Getting " + $fileName + "'s metadata from cloud")
+        return $object;
+    }
+    elseif ($response.StatusCode.Value__ -eq 401) {
+        RefreshToken
+        GetCloudFileMetaData $fileName $cName
+    }
+}
+function GetCloudFileDetail($fileName, $cName) {
+    $objectMetaData = GetCloudFileMetaData $fileName $cName;
+
+    if ($objectMetaData) {
+        if ($objectMetaData.Headers.GetEnumerator() | Where-Object {$_.Key -eq "X-Object-Manifest"}) {
+            $prefix = $objectMetaData.Headers["X-Object-Manifest"].Replace($cName + "/", "").Replace("%21", "!")
+            $result = _GetCloudFilePrefix $cName $prefix
+
+
+            $totalBytes = 0
+            $([xml]$result).SelectNodes('//container/object') | ForEach-Object {
+                #Write-Host $_.name $_.hash $_.bytes $_.last_modified
+                $totalBytes += $_.bytes       
+            }
+            $objectMetaData.Headers["Content-Length"] = $totalBytes
+        }
+    }
+    return $objectMetaData
+}
+
+#TODO need some assintance
+function DeciceBufferSizeForMultipart($fileLength) {
+    # A large object can have a maximum of 2048 segments. Each segment can be up to 5 GB. 
+    # So the maximum size of a file that you can upload to Oracle Cloud Infrastructure 
+    # Object Storage Classic as a large object is 10 TB.
+    if ($fileLength -gt (10 * 1024 * 1024 * 1024 * 1024) ) {
+        Write-Log -Level Error -Message ("File is too Huge for object Storaga up to 10 TB")
+        return 0;
+    }
+
+    if ($fileLength / 2048 -lt 10 * 1024 * 1024) {
+        return 10 * 1024 * 1024
+    }
+    elseif ($fileLength / 2048 -lt 30 * 1024 * 1024) {
+        return 30 * 1024 * 1024
+    }
+    elseif ($fileLength / 2048 -lt 50 * 1024 * 1024) {
+        return 50 * 1024 * 1024
+    }
+    elseif ($fileLength / 2048 -lt 100 * 1024 * 1024) {
+        return 100 * 1024 * 1024
+    }
+    else {
+        return [Int32] $fileLength / 2048
+    }
+    
+     
+}
+
+function _UploadFile($localfilePath, $toUploadFileName, $cName) {
+    $_file = (Get-ChildItem $localfilePath)
+    
+    if (!$toUploadFileName) {
+        $toUploadFileName = _GetUploadName($_file)
+    }
+    
+    if ((HasSpecificFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true) {
+        Write-Log -Level Info -Message ("you already have this File")
+        return $true;
+    }
+
+    if ($_file.Length -gt 10000000) {
+        try {
+            $bufSize = DeciceBufferSizeForMultipart -fileLength $_file.Length
+            if ($bufSize -eq 0) {
+                return false;
+                write-host too big file
+            }
+            $prefix = _splitFile -LoadFile $localfilePath -bufSize  $bufSize
+
+            foreach ($chunkfile in $prefix.FileList) {
+                __UploadFile -cName $cName -localfilePath $chunkfile -toUploadFileName $(_GetUploadName((Get-ChildItem $chunkfile)))
+            }
+
+            
+            $lastObjectName = _GetUploadName (Get-ChildItem ($prefix.FileList[-1]))
+            _SetMarker -cName compute_images -LastFilePath $lastObjectName -prefix $prefix.GuidName -_RealFileName $_RealFileName
+            _CreatevirtualFile -cName compute_images -prefix $prefix.GuidName -LastLocalFileModifiedDate $_file.LastWriteTime.ToUniversalTime() -_RealFileName $toUploadFileName
+    
+        }
+        catch {
+            Write-Log -Level Warn -Message ("error occured while uploading file")
+        }
+        finally {
+            foreach ($chunkfile in $prefix.FileList) {
+                Remove-Item -Path $chunkfile
+            }
+        }
+    }
+    else {
+        __UploadFile -cName $cName -localfilePath $localfilePath -toUploadFileName $toUploadFileName
+    }
+}
+
+function UploadAll($cName , $LocalFilePath = "E:\Pictures", $extension = "*") {
+    
+    $i = 1;
+    $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension  | Measure-Object ).Count;
+
+    Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Sort-Object LastWriteTimeUtc -Descending  | Foreach-Object {
+        Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount) * 100)
+        _UploadFile -cName $cName -localfilePath $_.FullName
+        
+		
+        $i = $i + 1;
+    }
+}
+ 
+function HasSpecificFileOnTheCloud($cName, $localFile, $toUploadFileName) {
+    $_file = (Get-ChildItem $localFile)
+    if (!$toUploadFileName) {
+        $toUploadFileName = _GetUploadName($_file)
+    }
+    $errorFlag = 0;	
+    $cloudFile = (GetCloudFileDetail -cName $cName -fileName $toUploadFileName)
+
+    if ($cloudFile -ne $null) {
+        #these files length are same
+        if ([long]$cloudFile.Headers["Content-Length"] -ne $_file.Length) {   
+            Write-Log -Level Info -Message ("Content Lengths are not matched! " + $cloudFile.Headers["Content-Length"] + " <> " + $_file.Length)
+            $errorFlag = 1
+        }
+		
+        #as we expect the date of these files
+        if ([datetime]$cloudFile.Headers["Last-Modified"] -lt $_file.LastAccessTimeUtc -and $errorFlag -ne -1) {
+            Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for " + ($_.LastWriteTimeUtc) + " " + $cloudFile.Headers["Last-Modified"] + " <= " + $_file.LastWriteTimeUtc)
+            $errorFlag = 1
+        }
+
+        if ($errorFlag -eq 0) {
+            Write-Log -Level Info -Message ("By-passing, file already has on the cloud " + ($_file.Name));
+            return $true;
+        }	
+    }
+
+    return $false;
+}
+
+# DO NOT USE THIS METHOD
+function DeleteFileFromCloud($fileName, $cName, $overrideAllYes = $false) {
+    Write-Log -Level Warn -Message ("Script will delete this file " + $fileName + " from cloud")
+    if ($overrideAllYes) {
+        $confirmation = "y";
+    }
+    else {
+        $confirmation = Read-Host "Are you sure to delete this file? [y/n]"
+    }
+    
+    if ($confirmation -eq "y") {
+        $files = GetCloudFileDetail $fileName $cName
+        if ($files.GetType() | Where-Object Name -eq "String") {
+            #multipart
+            $([xml]$files).SelectNodes('//container/object') | ForEach-Object {
+                _DeleteFileFromCloud $_.name $cName
+            }
+        }
+        else {
+            _DeleteFileFromCloud $fileName $cName
+        }
+    }
+    else {
+        Write-Log -Level Info -Message ("Canceled")
+        return $null;
+    }
+}
 
 <#
 .Synopsis
@@ -90,618 +541,168 @@ $extension='*'
 .LINK
    https://gallery.technet.microsoft.com/scriptcenter/Write-Log-PowerShell-999c32d0
 #>
- 
+function Write-Log {
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory = $true,
+            ValueFromPipelineByPropertyName = $true)]
+        [ValidateNotNullOrEmpty()]
+        [Alias("LogContent")]
+        [string]$Message,
 
-
-$StorageAccountName = 'Storage-' + $IdentityDomain
-$OracleApiUri = 'https://' + $IdentityDomain + '.eu.storage.oraclecloud.com/'
-$AuthUri = $OracleApiUri + 'auth/v1.0'
-$StorageUri = $OracleApiUri + "v1/" + $StorageAccountName + '/'
-$XStorageUser = $StorageAccountName + ':' + $UserEmail
-$AuthToken = ''
-
-$internalheaders = @{} 
-
-
-
-function GetToken {  
-    $headers_ = @{}
-    $headers_["X-Storage-User"] = $XStorageUser
-    $headers_["X-Storage-Pass"] = $UserPass
-    #$headers_["Content-Type"]= "text/plain;charset=UTF-8" 
-    Write-Log -Level Info -Message "Getting new Token"
-    $script:AuthToken = (Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri).Headers["X-Auth-Token"].ToString();
-    $internalheaders["X-Auth-Token"] = $script:AuthToken;	 
-    Write-Log -Level Info -Message $("New Token's value is " + ($script:AuthToken))
-}
-
-function ListContainers() {
-    $response = "";
-    $internalheaders["Content-Type"] = "application/xml;charset=utf8"
-    try { 
-        $continers = Invoke-WebRequest -Method GET -Headers $internalheaders $OracleApiUri'v1/'$StorageAccountName"?limit=15&delimiter=%2F&format=xml"
-    } 
-    catch {
-        $response = $_.Exception.Response
-    }
-
-    if ($continers.StatusCode -eq 200) {
-        $([xml]$continers.Content).SelectNodes('//account/container') | ForEach-Object {
-            Write-Host $_.name
-        }
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        ListContainers
-    }
-   
-}
-
-function ListCloudFiles($cName = $ContainerName) {
-    $response = "";
-    Write-Log -Level Info -Message "Getting file list from cloud"
-    $internalheaders["Content-Type"] = "application/xml;charset=utf8"
-
-    try { 
-        $files = Invoke-WebRequest -Method GET -Headers $internalheaders $StorageUri$cName"?limit=1000&delimiter=%2F&format=xml" 
-    } 
-    catch {
-        $response = $_.Exception.Response
-    }
-     
-    [System.Collections.ArrayList]$FileListToBeShown = @()  
-    $tempManifestFile = "";
+        [Parameter(Mandatory = $false)]
+        [Alias('LogPath')]
+        [string]$Path = $PSScriptRoot + '\PowerShellLog.log',
         
-    if ($files.StatusCode -eq 200) {
-
-        $([xml]$files.Content).SelectNodes('//container/object') | ForEach-Object {
-            #Write-Host $_.name $_.hash $_.bytes $_.last_modified
-            $FileListToBeShown.Add($_.name)| Out-Null
-            if ($_.bytes -eq 0) {
-                $object = GetCloudFileMetaData $_.name $cName
-                $tempManifestFile = $object.Headers["X-Object-Manifest"].Replace($cName + "/", "").Replace("%21", "!") #TODO ASCII Replace
-            }
-             
-            if ($_.name.Contains($tempManifestFile)) {
-                $FileListToBeShown.Remove($_.name) | Out-Null
-            }
-            
-        }
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        ListCloudFiles $cName
-    }
-
-    $FileListToBeShown
-}
-
-function GetCloudFileMetaData($fileName, $cName = $ContainerName) {
-    $response = "";
-    try { 
-        $object = Invoke-WebRequest -Method HEAD -Headers $internalheaders ($StorageUri + $cName + '/' + $fileName)
-    } 
-    catch {
-        Write-Log -Level Warn -Message ("An error occured while getting " + $fileName + "'s metadata from cloud")
-        $response = $_.Exception.Response
-    }
-    
-    if ($object.StatusCode -eq 200) {
-        Write-Log -Level Info -Message ("Getting " + $fileName + "'s metadata from cloud")
-        return $object;
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        GetCloudFileMetaData $fileName $cName
-    }
-}
-
-function _GetCloudFilePrefix($cName = $ContainerName, $prefix) {
-    $response = "";
-    try { 
-         
-        $object = Invoke-WebRequest -Method GET -Headers $internalheaders ($StorageUri + $cName + '?prefix=' + $prefix + "&delimiter=%2F&format=xml") 
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("Error", "Warn", "Info")]
+        [string]$Level = "Info",
         
-    } 
-    catch {
-        $response = $_.Exception.Response
+        [Parameter(Mandatory = $false)]
+        [switch]$NoClobber
+    )
+
+    Begin {
+        # Set VerbosePreference to Continue so that verbose messages are displayed.
+        $VerbosePreference = 'Continue'
     }
-    #Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
-    if ($object.StatusCode -eq 200) {
-        return $object.Content;
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        _GetCloudFilePrefix $cName $prefix
-    }
-}
-
-function GetCloudFileDetail($fileName, $cName = $ContainerName) {
-    $objectMetaData = GetCloudFileMetaData $fileName $cName;
-    if ($objectMetaData.Headers.GetEnumerator() | Where-Object {$_.Key -eq "X-Object-Manifest"}) {
-        $prefix = $objectMetaData.Headers["X-Object-Manifest"].Replace($cName + "/", "").Replace("%21", "!")
-        $result = _GetCloudFilePrefix $cName $prefix
-
-
-        $totalBytes = 0
-        $([xml]$result).SelectNodes('//container/object') | ForEach-Object {
-            #Write-Host $_.name $_.hash $_.bytes $_.last_modified
-            $totalBytes += $_.bytes       
-        }
-        $objectMetaData.Headers["Content-Length"] = $totalBytes
-
-    }
-    return $objectMetaData
-}
-
-
-
-function __UploadFile($localfilePath, $toUploadFileName, $cName = $ContainerName) {
-    $response = "";
-    $ssUri = ($StorageUri + $cName + '/' + $toUploadFileName)
-    try { 
-         
-        Write-Log -Level Info -Message (" Starting to upload " + $localfilePath + "' as named " + $toUploadFileName + " to cloud")
-        $object = Invoke-WebRequest -Method PUT -Headers $internalheaders $ssUri -InFile $localfilePath 
-    } 
-    catch {
-        $response = $_.Exception.Response
-    }
-    #Write-Log -Level Info -Message ("Getting "+$fileName +"'s metadata from cloud")
-    if ($object.StatusCode -eq 201) {
-        Write-Log -Level Info -Message (" File successfully uploaded.`t" + ($object.StatusDescription) + "`tPUT`t" + ($StorageUri + $cName + '/' + ($toUploadFileName.Name)))
-        return $true;
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        __UploadFile $localfilePath $toUploadFileName $cName
-    }
-    else {
-        Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
-        Write-Output $object
-        return $false;
-    }
-}
-
-function _UploadFile($localfilePath, $toUploadFileName, $cName = $ContainerName) {
-    $_file = (Get-ChildItem $localfilePath)
-    $_RealFileName = $_file.Name
-    #TODO: We must consider replace the file which has already in there this method overrides now
-    if (!$toUploadFileName) {
-        $toUploadFileName = $_file.Name
-    }
-    
-    if ((HasSpecificFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true) {
-        Write-Log -Level Info -Message ("you already have this File")
-        return $true;
-    }
-
-    if ($_file.Length -gt 10000000) {
-        $prefix = _splitFile $localfilePath 10000000 
-        #$guid = ($localfilePath + $prefix.GuidName)
-
-        foreach ($chunkfile in $prefix.FileList) {
-            __UploadFile -cName $cName -localfilePath $chunkfile -toUploadFileName $toUploadFileName
-        }
-
-        $lastObjectName = Split-Path $prefix.FileList[-1] -leaf
-        _SetMarker -cName compute_images -filename $lastObjectName.Name -prefix $prefix.GuidName -_RealFileName $_RealFileName
-        _CreatevirtualFile -cName compute_images -prefix $prefix.GuidName -LastLocalFileModifiedDate $_file.LastWriteTime.ToUniversalTime() -_RealFileName $_RealFileName
-    
-
-        foreach ($chunkfile in $prefix.FileList) {
-            Remove-Item -Path $chunkfile
-        }
-  
-    }
-    else {
-        __UploadFile -cName $cName -localfilePath $localfilePath -toUploadFileName $toUploadFileName
-    }
-}
-
-function UploadAll($cName = $ContainerName, $LocalFilePath = "E:\Pictures", $extension = "*") {
-    
-    $i = 1;
-    $fileCount = ( Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension  | Measure-Object ).Count;
-
-    Get-ChildItem $LocalFilePath -Recurse -File -Filter $extension | Sort-Object LastWriteTimeUtc -Descending  | Foreach-Object {
-        Write-Progress -Activity "Uploading files" -status "Processing File(s) $i of $fileCount" -percentComplete ($i / ($fileCount) * 100)
-        _UploadFile -cName $cName -localfilePath $_.FullName
+    Process {
         
-		
-        $i = $i + 1;
-    }
-}
-
-
-function HasSpecificFileOnTheCloud($cName, $localFile, $toUploadFileName) {
-    $_file = (Get-ChildItem $localFile)
-    #TODO: We must consider replace the file which has already in there this method overrides now
-    if (!$toUploadFileName) {
-        $toUploadFileName = $_file.Name
-    }
-    $errorFlag = 0;	
-    $cloudFile = (GetCloudFileMetaData -cName $cName -fileName $toUploadFileName)
-
-    if ($cloudFile -ne $null) {
-        #these files length are same
-        if ([long]$cloudFile.Headers["Content-Length"] -ne $_file.Length) {   
-            Write-Log -Level Info -Message ("Content Lengths are not matched! " + ($_.Length) + " " + $cloudFile.Headers["Content-Length"] + " <> " + $_file.Length)
-            $errorFlag = 1
-        }
-		
-        #as we expect the date of these files
-        if ([datetime]$cloudFile.Headers["Last-Modified"] -lt $_file.LastAccessTimeUtc) {
-            Write-Log -Level Info -Message ("Last-Modified/LastWriteTimeUtc values are not expected  for " + ($_.LastWriteTimeUtc) + " " + $cloudFile.Headers["Last-Modified"] + " <= " + $_file.LastWriteTimeUtc)
-            $errorFlag = 1
+        # If the file already exists and NoClobber was specified, do not write to the log.
+        if ((Test-Path $Path) -AND $NoClobber) {
+            Write-Error "Log file $Path already exists, and you specified NoClobber. Either delete the file or specify a different name."
+            Return
         }
 
-        if ($errorFlag -eq 0) {
-            Write-Log -Level Info -Message ("By-passing, file already has on the cloud " + ($_file.Name));
-            return $true;
-        }	
-    }
-
-    return $false;
-}
-
-
-
-
-function _DeleteFileFromCloud($fileName, $cName = $ContainerName) {
-    $result = Invoke-WebRequest -Method DELETE -Headers $internalheaders ($StorageUri + $cName + '/' + $fileName)
-    if ($result.StatusCode -eq 204) {
-        Write-Log -Level Info -Message "File deletion succeeded"
-        return $true;
-    }
-    elseif ($continers.StatusCode -eq 401) {
-        (GetToken);
-        _DeleteFileFromCloud $fileName $cName
-    }
-    else {
-        Write-Log -Level Info -Message "Error! File couldnt delete"
-        return $false;
-    }
-}
-# DO NOT USE THIS METHOD
-function DeleteFileFromCloud($fileName, $cName = $ContainerName, $overrideAllYes = $false) {
-    Write-Log -Level Warn -Message ("Script will delete this file " + $fileName + " from cloud")
-    if ($overrideAllYes) {
-        $confirmation = "y";
-    }
-    else {
-        $confirmation = Read-Host "Are you sure to delete this file? [y/n]"
-    }
-    
-    if ($confirmation -eq "y") {
-        $files = GetCloudFileDetail $fileName $cName
-        if ($files.GetType() | Where-Object Name -eq "String") {
-            #multipart
-            $([xml]$files).SelectNodes('//container/object') | ForEach-Object {
-                _DeleteFileFromCloud $_.name $cName
-            }
+        # If attempting to write to a log file in a folder/path that doesn't exist create the file including the path.
+        elseif (!(Test-Path $Path)) {
+            Write-Verbose "Creating $Path."
+            $NewLogFile = New-Item $Path -Force -ItemType File
         }
+
         else {
-            _DeleteFileFromCloud $fileName $cName
+            # Nothing to see here yet.
         }
-    }
-    else {
-        Write-Log -Level Info -Message ("Canceled")
-        return $null;
-    }
-}
 
-function _SetMarker($cName = $ContainerName, $filename, $prefix, $_RealFileName) {
-    $response = "";
-    try { 
-        $object = Invoke-WebRequest -Method GET -Headers $internalheaders ($StorageUri + $cName + "?marker=" + $filename + "&prefix=" + $_RealFileName + $prefix + "&delimiter=%2F&format=xml")
-    } 
-    catch {
-        Write-Log -Level Warn -Message ("An error occured while setting marker " + $fileName)
-        $response = $_.Exception.Response
-    }
-    
-    if ($object.StatusCode -eq 200) {
-        Write-Log -Level Info -Message ("setting " + $fileName + "'s marker to cloud")
-        return $object;
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        _SetMarker $cName $fileName $prefix $_RealFileName
-    }
-}
+        # Format Date for our Log File
+        $FormattedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-function _CreatevirtualFile($cName = $ContainerName, $prefix, $LastLocalFileModifiedDate, $_RealFileName) {
-    $response = "";
-    try { 
-        $createHeader = $internalheaders;
-        $createHeader.Add("X-Object-Meta-Cb-Modifiedtime", $LastLocalFileModifiedDate)
-        $createHeader.Add("X-Object-Manifest", ($cName + "/" + $_RealFileName + $prefix))
-        $createHeader.Add("Content-Length", "0")
-        $object = Invoke-WebRequest -Method PUT -Headers $createHeader ($StorageUri + $cName + "/" + $_RealFileName)
-    } 
-    catch {
-        Write-Log -Level Warn -Message ("An error occured while creating virtualfile" + $fileName)
-        $response = $_.Exception.Response
-    }
-    
-    if ($object.StatusCode -eq 201) {
-        Write-Log -Level Info -Message ("creating " + $fileName + "'s virtual file")
-        return $object;
-    }
-    elseif ($response.StatusCode.Value__ -eq 401) {
-        (GetToken);
-        Write-Log -Level Info -Message "Token has been expired"
-        Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-        _CreatevirtualFile $cName $prefix $LastLocalFileModifiedDate $_RealFileName
-    }
-}
-
-
-function _splitFile($inFile, [Int32] $bufSize) {
-    [System.Collections.ArrayList]$fileList = @() 
-    $localFile = (get-item $inFile) 
-    $_guid = ([guid]::NewGuid()).ToString().Replace("-", "")
-    $_guid = "EB7A645290604987A8593CF7224B6A3D" #forcloudberry
-    $guidName = ("!CB_" + $_guid + "_")
-    $outPrefix = $localFile.FullName + $guidName.ToUpper() 
-    $stream = [System.IO.File]::OpenRead($inFile)
-  
-    $chunkNum = 0
-    $barr = New-Object byte[] $bufSize
-
-    while ( $bytesRead = $stream.Read($barr, 0, $bufsize)) {
-        $outFile = ($outPrefix + $chunkNum.ToString().PadLeft(6, '0'))
-        $fileList.Add($outFile) | Out-Null
-        $ostream = [System.IO.File]::OpenWrite($outFile)
-        $ostream.Write($barr, 0, $bytesRead);
-        $ostream.close();
-        $chunkNum += 1
-    }
-    $returnOject = "" 
-    $returnOject = $returnOject| Add-Member @{GuidName = $guidName}  -PassThru
-    $returnOject = $returnOject|Add-Member @{FileList = $fileList} -PassThru
-   
-    return $returnOject;
-}
-
-
-
-
- 
-#warm up
-GetToken
-#ListCloudFiles "compute_images"
-#GetCloudFileDetail -fileName "SSRS_ReportCount.pbix" -cName "compute_images"
-
-UploadAll -cName "compute_images" -extension "*" -LocalFilePath "D:\Setup\SSRS_ReportCount.pbix" 
-
-#HasSpecificFileOnTheCloud -cName "compute_images" -localFile  "D:\Setup\SSRS_ReportCount.pbix" 
-
-
-#GetCloudFileDetail -fileName "nmap-7.70-setup.exe" -cName "compute_images"
-
-#BigFileUpload -localfilePath  "D:\Setup\SSRS_ReportCount.pbix"
-
- 
-#SplitFilesWithgfsplit D:\Setup\Sys_Ctr_Ops_Manager_Svr_2012_wSP1_Turkish_X18-57405.ISO   50000
- 
-#curl -v -k -X GET -H "X-Auth-Token: AUTH_tk91fe51c43f07cb8e7c3c7d8a00bc22dd" "https://linkpluscloud.eu.storage.oraclecloud.com/v1/Storage-linkpluscloud/compute_images?marker=Sys_Ctr_Ops_Manager_Svr_2012_wSP1_Turkish_X18-57405.ISO!CB_EB7A645290604987A8593CF7224B6A3D_000012&prefix=Sys_Ctr_Ops_Manager_Svr_2012_wSP1_Turkish_X18-57405.ISO!CB_EB7A645290604987A8593CF7224B6A3D_&delimiter=%2F&format=xml"
-
-
-
-#curl -v -k -X PUT -H "X-Auth-Token: AUTH_tk91fe51c43f07cb8e7c3c7d8a00bc22dd" -H "X-Object-Meta-Cb-Modifiedtime: Tuesday, ‎April ‎26, ‎2016, ‏‎11:38:39 GMT" -H "X-Object-Manifest: compute_images/Sys_Ctr_Ops_Manager_Svr_2012_wSP1_Turkish_X18-57405.ISO!CB_EB7A645290604987A8593CF7224B6A3D_" -H "Content-Length: 0"   "https://linkpluscloud.eu.storage.oraclecloud.com/v1/Storage-linkpluscloud/compute_images/Sys_Ctr_Ops_Manager_Svr_2012_wSP1_Turkish_X18-57405.ISO"
-
-
-
-
-
-
-# function CreatManifestFileForBigFile($localPath, $FileName, $cName = $ContainerName) {
-
-#     $arr = Get-ChildItem  $localPath    | Foreach-Object {$_.Name}
-#     $Falloutlist = @()
-#     $ManifestPath = $($localPath + "/" + $FileName + ".manifest.json")
- 
-#     foreach ($f in $arr) {
-#         $file = GetCloudFileMetaData -fileName $f -cName compute_images
-#         if ($file.StatusCode -eq 200) {
-#             $CurrentItem = New-Object system.Object
-#             $CurrentItem | Add-Member -type Noteproperty -Name path -Value compute_images/$f
-#             $CurrentItem | Add-Member -type Noteproperty -Name etag -Value $file.Etag
-#             $CurrentItem | Add-Member -type Noteproperty -Name size_bytes -Value $file."Content-Length".Replace("""", "")
-        		
-#             $Falloutlist = $Falloutlist + $CurrentItem
-#         }
-#     }
-#     $Falloutlist| convertto-json >  $ManifestPath
-
-     
-#     #UploadFile -isManifest $true -cName $cName -localfilePath $($ManifestPath+"/"+$FileName)
-  
-#     return $true
-# }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# function GetWebRequest($Uri, $get, $InFile, $OutFile) {
-#     $headers = @{}
-#     $_result;
-
-#     if ($script:AuthToken -eq '') {
-#         (GetToken);
-#     }
-
-#     $headers["X-Auth-Token"] = $script:AuthToken;
-#     try {
-#         if ($InFile) {
-#             Write-Log -Level Info ("Invoke-WebRequest -Method " + $get + " -Headers [""X-Auth-Token""]" + $headers["X-Auth-Token"] + " " + $Uri + "-InFile" + $InFile)
-#             $response = Invoke-WebRequest -Method $get -Headers $headers $Uri -InFile  $InFile
-#         }
-#         else {
-#             Write-Log -Level Info ("Invoke-WebRequest -Method " + $get + " -Headers [""X-Auth-Token""]" + $headers["X-Auth-Token"] + " " + $Uri)
-#             $response = Invoke-WebRequest -Method $get -Headers $headers $Uri
-#         }
+        # Write message to error, warning, or verbose pipeline and specify $LevelText
+        switch ($Level) {
+            'Error' {
+                Write-Error $Message
+                $LevelText = 'ERROR:'
+            }
+            'Warn' {
+                Write-Warning $Message
+                $LevelText = 'WARNING:'
+            }
+            'Info' {
+                Write-Verbose $Message
+                $LevelText = 'INFO:'
+            }
+        }
         
-#         if ($response.StatusCode -eq 200) {
-#             Write-Log -Level Info -Message ("Successfully executed.`t" + $response.StatusDescription + "`t" + $get + "`t" + $Uri)
-#         }
-#         elseif ($response.StatusCode -eq 401) {
-#             (GetToken);
-#             Write-Log -Level Info -Message "Token has been expired"
-#             Write-Log -Level Warn -Message "Old Token's value is "+$script:AuthToken
-#             $_result = (GetWebRequest $Uri $get)
-#         }
-#         elseif ($response.StatusCode -eq 404) {
-#             Write-Log -Level Info -Message "No object found(s)"
-#         }
-#         elseif ($response.StatusCode -eq 204) {
-#             Write-Log -Level Info -Message "No object found(s)"
-#         }
-#         else {
-#             Write-Log -Level Info -Message "For Status Codes: https://docs.oracle.com/en/cloud/iaas/storage-cloud/ssapi/Status%20Codes.html"
-#             Write-Log -Level Info -Message ("Status Code: " + $response.StatusDescription + " " + $Uri + " " + $get)
-#             Write-Log -Level Info -Message "ERROR GetWebRequest else block";
-#         }
-#         Write-Host $response
-#     }
-#     catch {
-#         Write-Log -Level Warn -Message ($_.Exception.Message)
-#         Write-Output  $response
-#         return $null;
-#     }
-#     return CheckGetData($_result);
-# }
-
-
-
-
-
-
-
-
-
-# function CheckGetData($result) {
-#     $_result;
-#     if ($result -ne $null -and [bool]($result.PSobject.Properties.name -match "RawContent")) {
-#         if ($result.Content.gettype().Name -eq 'String') {
-#             $_result = $result.Content.Split("`r`n");
-#         }
-#         elseif ($result.Content.gettype().Name -eq 'Byte[]') {
-#             $_result = ConvertTextToObject($result.RawContent);
-#         }
-#     }
-    
-#     return ($_result);
-# }
-
-# function ConvertTextToObject($_result) {
-#     if (!$_result) {return $null; }
-
-#     $_result = $_result.Split("`r`n", [System.StringSplitOptions]::RemoveEmptyEntries)
-#     $properties = @{}
-#     $properties.Add("StatusCode", $_result[0].Replace("HTTP/1.1" , "").Split(" ")[1])
-#     $properties.Add("StatusDescription", $_result[0].Replace("HTTP/1.1" , "").Split(" ")[2])
-
-#     for ($i = 1; $i -lt $_result.Length; $i++) {
-#         $properties.Add($_result[$i].Split(": ", [StringSplitOptions]"None")[0] , ([regex]::split($_result[$i], ":\s"))[1])
-#     }
-
-#     $object = New-Object –TypeName PSObject –Prop $properties
-#     return $object;
-# }
-
-
-
-# function ManifestFile($remoteFile, $cName = $ContainerName) {
-#     #You can't download objects that are larger than 10 MB using the web console. To download such objects, use the CLI or REST API.
-#     $ssUri = ($StorageUri + $cName + '/' + $remoteFile + "?multipart-manifest=get")
-#     Write-Host $ssUri
-#     Write-Log -Level Info -Message ("Starting to download " + $remoteFile + " from the cloud")
-#     $file = GetCloudFileMetaData $remoteFile $cName
-#     #if($file.Contains("application/x-www-form-urlencoded;charset=UTF-8"))
-#     #{
-#     #has manifestfile
-#     return (GetWebRequest $ssUri  Get)
-#     # }
-#     #else
-#     #{
-#     #     Write-Log -Level Warn -Message (" "+$remoteFile +" doesn't have manifest file")
-#     #    return $null
-#     # }
-# }
-
-
-
-# function UploadFile($localfilePath, $toUploadFileName, $cName = $ContainerName, $isManifest) {
-#     #TODO: We must consider replace the file which has already in there this method overrides now
-#     if (!$toUploadFileName) {
-#         $toUploadFileName = (Get-ChildItem $localfilePath).Name
-#     }
-#     $ssUri = ($StorageUri + $cName + '/' + $toUploadFileName)
-
-#     if (!$isManifest) {
-
-#         if ((HasSpecificFileOnTheCloud -cName $cName -localFile $localfilePath -toUploadFileName $toUploadFileName ) -eq $true) {
-#             return $true;
-#         }
-#     }
-#     else {
-#         $ssUri = $ssUri + "?multipart-manifest=put"
-#     }
-	
-
-#     Write-Log -Level Info -Message (" Starting to upload " + $localfilePath + "' as named " + $toUploadFileName + " to cloud")
-
-#     $response = GetWebRequest -Uri  $ssUri -get PUT -InFile $localfilePath 
-
-#     if ($response.StatusCode -eq 201) {
-#         Write-Log -Level Info -Message (" File successfully uploaded.`t" + ($response.StatusDescription) + "`tPUT`t" + ($StorageUri + $cName + '/' + ($toUploadFileName.Name)))
-#         return $true;
-#     }
-#     else {
-#         Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
-#         Write-Output $response
-#         return $false;
-#     }
-# }
-
-
-
-
-
-
-
-
+        # Write log entry to $Path
+        "$FormattedDate $LevelText $Message" | Out-File -FilePath $Path -Append
+    }
+    End {
+    }
+}
  
+# we can use this function for better download speed
+function Measure-DownloadSpeed {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Please enter a URL to download.")]
+        [string] $Url
+        ,
+        [Parameter(Mandatory = $true, HelpMessage = "Please enter a target path to download to.")]
+        [string] $Path
+        ,
+        [Parameter(Mandatory = $true, HelpMessage = "Please enter a bucket name.")]
+        [string] $cName
+    )
+
+    function Get-ContentLength {
+        [CmdletBinding()]
+        param (
+            [string] $Url
+        )
+        
+        if(!$script:AuthToken){
+            RefreshToken
+        }
+
+
+        $Req = [System.Net.HttpWebRequest]::CreateHttp($Url);
+        $Req.Headers.Add("X-Auth-Token", $script:AuthToken)
+        $Req.Method = 'HEAD';
+        $Req.Proxy = $null;
+        $Response = $Req.GetResponse();
+        #Write-Output -InputObject $Response.ContentLength;
+        Write-Output -InputObject $Response;
+    }
+    $Url = $StorageUri + $cName + $Url
+    Write-Host $Url
+    $FileSize = (Get-ContentLength -Url $Url).ContentLength;
+
+    if (!$FileSize) {
+        throw 'Download URL is invalid!';
+    }
+
+    # Resolve the fully qualified path to the target file on the filesystem
+    # $Path = Resolve-Path -Path $Path;
+
+    if (Test-Path -Path $Path) {
+        # throw ('File already exists: {0}' -f $Path);
+    }
+
+    # Instantiate a System.Net.WebClient object
+    $wc = New-Object System.Net.WebClient;
+    $wc.Headers.Add("X-Auth-Token", $script:AuthToken)
+
+    # Invoke asynchronous download of the URL specified in the -Url parameter
+    $wc.DownloadFileAsync($Url, $Path);
+
+    # While the WebClient object is busy, continue calculating the download rate.
+    # This could potentially be broken off into its own function, but hey there's procrastination for that.
+    while ($wc.IsBusy) {
+        # Get the current time & file size
+        #$OldSize = (Get-Item -Path $TargetPath).Length;
+        $OldSize = (New-Object -TypeName System.IO.FileInfo -ArgumentList $Path).Length;
+        $OldTime = Get-Date;
+
+        # Wait a second
+        Start-Sleep -Seconds 1;
+
+        # Get the new time & file size
+        $NewSize = (New-Object -TypeName System.IO.FileInfo -ArgumentList $Path).Length;
+        $NewTime = Get-Date;
+
+        # Calculate time difference and file size.
+        $SizeDiff = $NewSize - $OldSize;
+        $TimeDiff = $NewTime - $OldTime;
+
+        # Recalculate download rate based off of actual time difference since
+        # we can't assume precisely 1 second time difference due to file IO.
+        $UpdatedSize = $SizeDiff / $TimeDiff.TotalSeconds;
+
+        # Write-Host -Object $TimeDiff.TotalSeconds, $SizeDiff, $UpdatedSize;
+
+        Write-Host -Object ("Download speed is: {0:N2}MB/sec NewSize:{1}TotalSize{2}" -f ($UpdatedSize / 1MB), $NewSize, $FileSize);
+
+    }
+}
+
+GetToken
+#ListCloudFiles "PROD_BLDY_EXCH_AREA"
+#GetCloudFileDetail -cName "compute_images" -fileName "SSRS_ReportCount.pbix "
+UploadAll -cName "compute_images" -extension "*" -LocalFilePath "E:\Pictures"
+
+
+#Measure-DownloadSpeed -cName "compute_images" -Url "/bootimagetestdcv2.tar.gz" -Path C:\Users\can.kaya\Desktop\bootimagetestdcv2.tar.gz
+ 
+
+#_splitFile "E:\Pictures\2\SSRS_ReportCount.pbix" 10485760
