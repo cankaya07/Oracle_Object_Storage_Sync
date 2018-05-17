@@ -41,7 +41,7 @@ $IdentityDomain = 'linkpluscloud'
 	UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
 
 #>
-
+ 
 $StorageAccountName = 'Storage-' + $IdentityDomain
 $OracleApiUri = 'https://' + $IdentityDomain + '.eu.storage.oraclecloud.com/'
 $AuthUri = $OracleApiUri + 'auth/v1.0'
@@ -56,16 +56,14 @@ function GetToken {
     $headers_["X-Storage-User"] = $XStorageUser
     $headers_["X-Storage-Pass"] = $UserPass
     #$headers_["Content-Type"]= "text/plain;charset=UTF-8" 
-    Write-Log -Level Info -Message "Getting new Token"
     $script:AuthToken = (Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri).Headers["X-Auth-Token"].ToString();
     $script:internalheaders["X-Auth-Token"] = $script:AuthToken;	 
-    Write-Log -Level Info -Message $("New Token's value is " + ($script:AuthToken))
+    Write-Log -Level Info -Message $("New Token created value is " + ($script:AuthToken))
 }
 
 function RefreshToken {
+    Write-Log -Level Info -Message ("There is no Token or expired. Old Token's value is: " + $script:AuthToken)
     (GetToken);
-    Write-Log -Level Info -Message "Token has been expired"
-    Write-Log -Level Warn -Message ("Old Token's value is "+$script:AuthToken)
 }
 
 function _GetCloudFilePrefix($cName, $prefix) {
@@ -119,13 +117,13 @@ function _GetUploadName($localFilePath) {
 function _CreatevirtualFile($cName , $prefix, $LastLocalFileModifiedDate, $_RealFileName) {
     $response = "";
     try { 
-        $_RealFileName = $_RealFileName.Replace("/","%2F")
+        $_RealFileName = $_RealFileName.Replace("/", "%2F")
         #compute_images/Pictures%2F2%2FSSRS_ReportCount.pbix!CB_EB7A645290604987A8593CF7224B6A3D_
         $createHeader = $internalheaders;
         $createHeader.Add("X-Object-Meta-Cb-Modifiedtime", $LastLocalFileModifiedDate)
         $createHeader.Add("X-Object-Manifest", ($cName + "/" + $_RealFileName + $prefix))
         $createHeader.Add("Content-Length", "0")
-        Write-Log -Level Info -Message ("Manifest-> "+($cName + "/" + $_RealFileName + $prefix))
+        Write-Log -Level Info -Message ("Manifest-> " + ($cName + "/" + $_RealFileName + $prefix))
         Write-Log -Level Info -Message ($StorageUri + $cName + "/" + $_RealFileName)
         $object = Invoke-WebRequest -Method PUT -Headers $createHeader ($StorageUri + $cName + "/" + $_RealFileName)
     } 
@@ -294,7 +292,7 @@ function ListCloudFiles($cName) {
 
         $([xml]$files.Content).SelectNodes('//container/object') | ForEach-Object {
             #Write-Host $_.name $_.hash $_.bytes $_.last_modified
-            $FileListToBeShown.Add($_.name+"`t`t"+($_.bytes/1024/1024)+"MB")| Out-Null
+            $FileListToBeShown.Add($_.name + "`t`t" + ($_.bytes / 1024 / 1024) + "MB")| Out-Null
             if ($_.bytes -eq 0) {
                 $object = GetCloudFileMetaData $_.name $cName
                 $tempManifestFile = $object.Headers["X-Object-Manifest"].Replace($cName + "/", "").Replace("%21", "!") #TODO ASCII Replace
@@ -631,7 +629,7 @@ function Measure-DownloadSpeed {
             [string] $Url
         )
         
-        if(!$script:AuthToken){
+        if (!$script:AuthToken) {
             RefreshToken
         }
 
@@ -695,14 +693,7 @@ function Measure-DownloadSpeed {
 
     }
 }
-
-GetToken
-#ListCloudFiles "PROD_BLDY_EXCH_AREA"
-#GetCloudFileDetail -cName "compute_images" -fileName "SSRS_ReportCount.pbix "
-UploadAll -cName "compute_images" -extension "*" -LocalFilePath "E:\Pictures"
-
-
-#Measure-DownloadSpeed -cName "compute_images" -Url "/bootimagetestdcv2.tar.gz" -Path C:\Users\can.kaya\Desktop\bootimagetestdcv2.tar.gz
  
 
-#_splitFile "E:\Pictures\2\SSRS_ReportCount.pbix" 10485760
+
+ 
