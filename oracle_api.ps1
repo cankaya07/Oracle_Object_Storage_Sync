@@ -1,7 +1,7 @@
 ﻿# BEGIN Parameters
-$UserEmail = 'ondermurat85@gmail.com'
-$UserPass = 'iBm1nd3r*'
-$IdentityDomain = 'linkpluscloud'
+$UserEmail = '@gmail.com'
+$UserPass = ''
+$IdentityDomain = ''
 # END Parameters
 
 
