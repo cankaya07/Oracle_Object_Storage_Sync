@@ -1,8 +1,6 @@
 ﻿# BEGIN Parameters
-$UserEmail = '@gmail.com'
-$UserPass = ''
-$IdentityDomain = ''
-# END Parameters
+$IdentityDomain = 'icisleribilgiislem'
+$extension = '*'
 
 
 <#
@@ -41,28 +39,78 @@ $IdentityDomain = ''
 	UploadAll -cName 'PROD_BLDY_EXCH_AREA' -extension "*" -LocalFilePath 'J:\SQLBACKUP\PROD-BLDY-SQL1\'
 
 #>
- 
+$RegKey = 'HKCU:\Software\Aryasoft\OOSSync'
 $StorageAccountName = 'Storage-' + $IdentityDomain
 $OracleApiUri = 'https://' + $IdentityDomain + '.eu.storage.oraclecloud.com/'
 $AuthUri = $OracleApiUri + 'auth/v1.0'
 $StorageUri = $OracleApiUri + "v1/" + $StorageAccountName + '/'
-$XStorageUser = $StorageAccountName + ':' + $UserEmail
-$AuthToken = ''
+$UserEmail = 'your mail address'
+$UserPass = 'yourpassword'
+
 
 $internalheaders = @{} 
 
+#execute independently this function to setup or update your information
+function WarmUp() {
+    if (-Not(Test-Path $RegKey)) {
+        New-Item -Path $($RegKey.TrimEnd($RegKey.Split('\')[-1])) -Name $($RegKey.Split('\')[-1]) -Force | Out-Null
+    }
+    
+    Set-ItemProperty -Path $RegKey -Name 'UN'  -Value  $($StorageAccountName + ':' + $UserEmail)
+    Set-ItemProperty -Path $RegKey -Name 'PW'  -Value $UserPass
+}
+
 function GetToken {  
     $headers_ = @{}
-    $headers_["X-Storage-User"] = $XStorageUser
-    $headers_["X-Storage-Pass"] = $UserPass
-    #$headers_["Content-Type"]= "text/plain;charset=UTF-8" 
-    $script:AuthToken = (Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri).Headers["X-Auth-Token"].ToString();
-    $script:internalheaders["X-Auth-Token"] = $script:AuthToken;	 
-    Write-Log -Level Info -Message $("New Token created value is " + ($script:AuthToken))
+    $headers_["X-Storage-User"] = (Get-ItemProperty -Path $RegKey -Name UN).UN
+    $headers_["X-Storage-Pass"] = (Get-ItemProperty -Path $RegKey -Name PW).PW
+
+    $response = "";
+    try { 
+        #compute_images?prefix=Pictures%2F2%2F&limit=1000&delimiter=%2F&format=xm
+        $object = Invoke-WebRequest -Method GET -Headers $headers_ $AuthUri 
+    } 
+    catch {
+        $response = $_.Exception
+    }
+
+    if ($object.StatusCode -eq 200) {
+        Set-ItemProperty -Path $RegKey -Name 'AUTH_KEY'  -Value $object.Headers["X-Auth-Token"]
+    }
+    else {
+        Write-Log -Level Info -Message  'Please update your email/password information. Could be outdated.'
+        Write-Log -Level Error -Message  $response.Message
+        break;
+    }
+
+    $script:internalheaders["X-Auth-Token"] = $(ReadToken)
+    Write-Log -Level Info -Message $("Getting new Token, New Token's value is " + $(ReadToken))
+}
+
+function ReadToken {
+    if (-Not(Test-Path $RegKey)) {
+        New-Item -Path $($RegKey.TrimEnd($RegKey.Split('\')[-1])) -Name $($RegKey.Split('\')[-1]) -Force | Out-Null
+    }
+
+    $Key = Get-Item -LiteralPath $RegKey
+    if ($Key.GetValue('AUTH_KEY', $null) -ne $null) {
+        if ($PassThru) {
+            Get-ItemProperty $Path 'AUTH_KEY'
+        }
+        else {
+            return (Get-ItemProperty -Path $RegKey -Name AUTH_KEY).AUTH_KEY
+        }
+    }
+    else {
+        Write-Log -Level Info -Message 'There is not registry key on the computer. Creating it.'
+        Set-ItemProperty -Path $RegKey -Name 'AUTH_KEY'  -Value ''
+        GetToken
+        ReadToken
+    }
 }
 
 function RefreshToken {
-    Write-Log -Level Info -Message ("There is no Token or expired. Old Token's value is: " + $script:AuthToken)
+    Write-Log -Level Warn -Message ("Token has been expired. Old Token's value is " + $(ReadToken) )
     (GetToken);
 }
 
@@ -233,6 +281,7 @@ function __UploadFile($localfilePath, $toUploadFileName, $cName ) {
     else {
         Write-Log -Level Warn -Message ("Error occured while file uploading" + $response.StatusDescription)
         Write-Output $object
+        Write-Output $reponse
         return $false;
     }
 }
@@ -412,7 +461,7 @@ function _UploadFile($localfilePath, $toUploadFileName, $cName) {
     
         }
         catch {
-            Write-Log -Level Warn -Message ("error occured while uploading file")
+            Write-Log -Level Warn -Message ("error occured while uploading file" + $_.Exception.Response)
         }
         finally {
             foreach ($chunkfile in $prefix.FileList) {
@@ -629,13 +678,13 @@ function Measure-DownloadSpeed {
             [string] $Url
         )
         
-        if (!$script:AuthToken) {
+        if (!$(ReadToken)) {
             RefreshToken
         }
 
 
         $Req = [System.Net.HttpWebRequest]::CreateHttp($Url);
-        $Req.Headers.Add("X-Auth-Token", $script:AuthToken)
+        $Req.Headers.Add("X-Auth-Token", $(ReadToken))
         $Req.Method = 'HEAD';
         $Req.Proxy = $null;
         $Response = $Req.GetResponse();
@@ -659,7 +708,7 @@ function Measure-DownloadSpeed {
 
     # Instantiate a System.Net.WebClient object
     $wc = New-Object System.Net.WebClient;
-    $wc.Headers.Add("X-Auth-Token", $script:AuthToken)
+    $wc.Headers.Add("X-Auth-Token", $(ReadToken))
 
     # Invoke asynchronous download of the URL specified in the -Url parameter
     $wc.DownloadFileAsync($Url, $Path);
@@ -693,7 +742,6 @@ function Measure-DownloadSpeed {
 
     }
 }
- 
 
-
- 
+#UploadAll -cName "SQL_BACKUP" -extension "*" -LocalFilePath 'C:\SQLBACKUP\1'
+GetToken
